@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-ui: "Plus Jakarta Sans", "Inter", sans-serif;
+  --font-preview: "Source Serif 4", serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: #f5f7fb;
+  color: #1f2937;
+  font-family: var(--font-ui);
+}
+
+main,
+header,
+section {
+  min-width: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.article-preview p {
+  margin-bottom: 1rem;
+  line-height: 1.75;
+}
+
+.stable-scrollbar {
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}

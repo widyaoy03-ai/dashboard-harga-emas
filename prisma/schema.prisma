@@ -1,0 +1,86 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model GoldPriceSnapshot {
+  id                String   @id
+  portal            String
+  jenis_konten      String
+  source_name       String
+  source_url        String
+  run_time          DateTime
+  update_time       String?
+  jenis_emas        String?
+  berat             String?
+  harga_terbaru     String?
+  harga_kemarin     String?
+  buyback           String?
+  delta             String?
+  percentage_change String?
+  tanggal_snapshot  DateTime
+  status            String
+  catatan           String?
+  price_rows        Json?
+
+  @@map("gold_price_snapshots")
+}
+
+model ArticleTemplate {
+  id                String   @id @default(cuid())
+  portal            String
+  jenis_konten      String
+  headline_template String
+  body_template     String
+  source_mapping    Json
+  example_patterns  Json     @default("[]")
+  is_active         Boolean  @default(true)
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  @@map("article_templates")
+}
+
+model SourceMappingMaster {
+  id               String   @id @default(cuid())
+  source_name      String   @unique
+  source_url       String
+  selector_config  Json
+  mode             String   @default("otomatis")
+  source_group     String   @default("manual")
+  price_currency   String   @default("IDR")
+  operational_note String?
+  content_mapping  Json     @default("[]")
+  is_active        Boolean  @default(true)
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  @@map("source_mapping_master")
+}
+
+model HistoryUpload {
+  id             String   @id @default(cuid())
+  file_name      String
+  file_type      String
+  upload_mode    String
+  parsed_summary Json
+  created_at     DateTime @default(now())
+
+  @@map("history_uploads")
+}
+
+model SourceMonitorLog {
+  id          String   @id @default(cuid())
+  source_name String
+  source_url  String
+  status      String
+  http_status Int?
+  message     String
+  checked_at  DateTime @default(now())
+
+  @@map("source_monitor_logs")
+}
