@@ -34,6 +34,9 @@ const snapshotSchema = z.object({
       tanggal_update: z.string().nullable(),
       delta: z.string().nullable(),
       percentage_change: z.string().nullable()
+      .optional(),
+      previous_snapshot_date: z.string().nullable().optional(),
+      previous_snapshot_run_time: z.string().nullable().optional()
     })
   )
 });

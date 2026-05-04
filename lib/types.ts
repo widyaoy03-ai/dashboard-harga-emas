@@ -101,6 +101,8 @@ export interface GoldPriceRow {
   tanggal_update: string | null;
   delta: string | null;
   percentage_change: string | null;
+  previous_snapshot_date?: string | null;
+  previous_snapshot_run_time?: string | null;
 }
 
 export interface GoldPriceSnapshot {
@@ -128,6 +130,7 @@ export interface RunDataResponse {
   ok: boolean;
   portal: Portal;
   jenis_konten: string;
+  selected_source?: SourceName | null;
   snapshots: GoldPriceSnapshot[];
   notifications: DashboardNotification[];
   partialFailure: boolean;

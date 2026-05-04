@@ -6,7 +6,8 @@ import type { Portal } from "@/lib/types";
 
 const schema = z.object({
   portal: z.enum(["Beritasatu", "Investor Daily"]),
-  jenisKonten: z.string().min(1)
+  jenisKonten: z.string().min(1),
+  source: z.string().optional().nullable()
 });
 
 export const runtime = "nodejs";
@@ -48,6 +49,6 @@ export async function POST(request: Request) {
     );
   }
 
-  const response = await runData(portal, parsed.data.jenisKonten);
+  const response = await runData(portal, parsed.data.jenisKonten, parsed.data.source);
   return NextResponse.json(response);
 }

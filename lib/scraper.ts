@@ -193,7 +193,9 @@ function createPriceRow(
     waktu_update: updateTime,
     tanggal_update: updateTime,
     delta: null,
-    percentage_change: null
+    percentage_change: null,
+    previous_snapshot_date: null,
+    previous_snapshot_run_time: null
   };
 }
 
@@ -284,7 +286,9 @@ function applyHistoricalComparison(rows: GoldPriceRow[], previous: GoldPriceSnap
     return {
       ...row,
       delta: comparison.delta,
-      percentage_change: comparison.percentage
+      percentage_change: comparison.percentage,
+      previous_snapshot_date: previousRow ? previous?.tanggal_snapshot ?? null : null,
+      previous_snapshot_run_time: previousRow ? previous?.run_time ?? null : null
     };
   });
 }
@@ -405,8 +409,27 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
   }
 }
 
-export async function runData(portal: Portal, jenisKonten: string) {
-  const sources = await getRuntimeSourcesForContent(portal, jenisKonten);
+export async function runData(portal: Portal, jenisKonten: string, selectedSource?: string | null) {
+  const allSources = await getRuntimeSourcesForContent(portal, jenisKonten);
+  const sources = selectedSource && selectedSource !== "Semua Source" ? allSources.filter((source) => source.name === selectedSource) : allSources;
+  if (!sources.length) {
+    return {
+      ok: false,
+      portal,
+      jenis_konten: jenisKonten,
+      selected_source: selectedSource ?? null,
+      snapshots: [],
+      notifications: [
+        {
+          id: crypto.randomUUID(),
+          kind: "warning" as const,
+          title: "Source belum tersedia",
+          message: "Source yang dipilih belum terhubung dengan jenis konten ini."
+        }
+      ],
+      partialFailure: false
+    };
+  }
   const snapshots = await Promise.all(sources.map((source) => runSingleSource(portal, jenisKonten, source)));
   await saveSnapshots(snapshots);
 
@@ -456,6 +479,7 @@ export async function runData(portal: Portal, jenisKonten: string) {
     ok: successful.length > 0,
     portal,
     jenis_konten: jenisKonten,
+    selected_source: selectedSource ?? null,
     snapshots,
     notifications,
     partialFailure,

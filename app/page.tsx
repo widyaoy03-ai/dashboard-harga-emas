@@ -1,41 +1,69 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { QueryClient, QueryClientProvider, useMutation } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Archive,
+  BarChart3,
   Bell,
+  BookOpen,
   CheckCircle2,
   Clipboard,
   Database,
-  Filter,
   FileText,
+  HelpCircle,
   History,
+  Info,
   LayoutDashboard,
   Loader2,
   Play,
-  RefreshCcw,
+  Search,
   Settings,
-  Upload,
+  TableProperties,
   X,
   Zap
 } from "lucide-react";
 import { AdminCMSPanel } from "@/components/AdminCMSPanel";
 import { contentSourceMap, menuItems, portalContentTypes, preflightRows, sourceConfigs } from "@/lib/content-framework";
 import { useDashboardStore } from "@/lib/dashboard-store";
-import type { DashboardNotification, GenerateArticleResponse, GoldPriceSnapshot, RunDataResponse } from "@/lib/types";
+import type { DashboardNotification, GenerateArticleResponse, GoldPriceRow, GoldPriceSnapshot, Portal, RunDataResponse } from "@/lib/types";
 
 const queryClient = new QueryClient();
+const ALL_SOURCES = "Semua Source";
 
 const iconMap = {
   Overview: LayoutDashboard,
-  "Source Management": Database,
   "Run Data": Play,
   "Generate Artikel": Zap,
-  "Himpunan Data Harga": Database,
+  "Data Harga Emas": TableProperties,
   Histori: History,
+  Documentation: BookOpen,
   Pengaturan: Settings
+};
+
+type SourceOption = {
+  name: string;
+  mode: "otomatis" | "manual";
+  group: string;
+  url: string;
+  selectorSummary: string;
+  operationalNote: string | null;
+};
+
+type SourceResponse = {
+  ok: boolean;
+  sources: SourceOption[];
+};
+
+type HistoryResponse = {
+  ok: boolean;
+  snapshots: GoldPriceSnapshot[];
+};
+
+type PriceRowWithSnapshot = {
+  snapshot: GoldPriceSnapshot;
+  row: GoldPriceRow;
 };
 
 function statusClass(status: string) {
@@ -45,13 +73,76 @@ function statusClass(status: string) {
   return "bg-slate-50 text-slate-700 border-slate-200";
 }
 
-function flattenPriceRows(snapshots: GoldPriceSnapshot[]) {
+function deltaClass(delta?: string | null) {
+  if (!delta || delta === "-") return "text-slate-500";
+  if (delta.trim().startsWith("+")) return "text-emerald-700";
+  if (delta.trim().startsWith("-")) return "text-red-700";
+  return "text-slate-500";
+}
+
+function formatMoney(value?: string | null) {
+  if (!value) return "-";
+  const clean = value.trim();
+  if (/^(Rp|US\$)/i.test(clean)) return clean.replace(/^Rp\.?/i, "Rp");
+  const digits = clean.replace(/[^\d]/g, "");
+  if (!digits) return clean;
+  return `Rp ${Number(digits).toLocaleString("id-ID")}`;
+}
+
+function formatDate(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("id-ID", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function numericPrice(value?: string | null) {
+  if (!value) return null;
+  const clean = value.replace(/[^\d,.-]/g, "");
+  if (!clean) return null;
+  if (clean.includes(",") && clean.includes(".")) {
+    const lastComma = clean.lastIndexOf(",");
+    const lastDot = clean.lastIndexOf(".");
+    return lastComma > lastDot ? Number(clean.replace(/\./g, "").replace(",", ".")) : Number(clean.replace(/,/g, ""));
+  }
+  if (clean.includes(",")) {
+    const parts = clean.split(",");
+    return parts.at(-1)?.length === 2 ? Number(clean.replace(/\./g, "").replace(",", ".")) : Number(clean.replace(/,/g, ""));
+  }
+  return Number(clean.replace(/\./g, ""));
+}
+
+function formatDeltaFromNumbers(current?: string | null, previous?: string | null) {
+  const currentValue = numericPrice(current);
+  const previousValue = numericPrice(previous);
+  if (currentValue === null || previousValue === null || Number.isNaN(currentValue) || Number.isNaN(previousValue)) {
+    return { delta: null, percentage: null };
+  }
+  const diff = currentValue - previousValue;
+  const percentage = previousValue === 0 ? null : `${diff >= 0 ? "+" : ""}${((diff / previousValue) * 100).toFixed(2)}%`;
+  return {
+    delta: `${diff >= 0 ? "+" : "-"}Rp ${Math.abs(diff).toLocaleString("id-ID")}`,
+    percentage
+  };
+}
+
+function flattenPriceRows(snapshots: GoldPriceSnapshot[]): PriceRowWithSnapshot[] {
   return snapshots.flatMap((snapshot) =>
     snapshot.price_rows.length
-      ? snapshot.price_rows.map((row) => ({
-          snapshot,
-          row
-        }))
+      ? snapshot.price_rows.map((row) => ({ snapshot, row }))
       : [
           {
             snapshot,
@@ -66,10 +157,59 @@ function flattenPriceRows(snapshots: GoldPriceSnapshot[]) {
               waktu_update: snapshot.update_time,
               tanggal_update: snapshot.update_time,
               delta: snapshot.delta,
-              percentage_change: snapshot.percentage_change
+              percentage_change: snapshot.percentage_change,
+              previous_snapshot_date: null,
+              previous_snapshot_run_time: null
             }
           }
         ]
+  );
+}
+
+function dedupeSnapshots(snapshots: GoldPriceSnapshot[]) {
+  const seen = new Set<string>();
+  return snapshots.filter((snapshot) => {
+    if (seen.has(snapshot.id)) return false;
+    seen.add(snapshot.id);
+    return true;
+  });
+}
+
+function HelpTooltip({ text, detailId }: { text: string; detailId?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="relative inline-flex items-center">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        onBlur={() => setOpen(false)}
+        className="group/help grid h-5 w-5 place-items-center rounded-full border border-border bg-surface text-textSecondary"
+        aria-label="Bantuan"
+      >
+        <HelpCircle className="h-3.5 w-3.5" aria-hidden="true" />
+        <span
+          className={`pointer-events-none absolute bottom-7 left-1/2 z-40 w-64 -translate-x-1/2 rounded-md bg-primaryDark px-3 py-2 text-left text-xs leading-5 text-white opacity-0 shadow-panel transition delay-300 group-hover/help:opacity-100 ${
+            open ? "opacity-100" : ""
+          }`}
+        >
+          {text}
+          {detailId && (
+            <a href={`#${detailId}`} className="mt-1 block font-semibold text-white underline">
+              Lihat detail
+            </a>
+          )}
+        </span>
+      </button>
+    </span>
+  );
+}
+
+function FieldLabel({ children, tooltip, detailId }: { children: React.ReactNode; tooltip: string; detailId?: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-textPrimary">
+      {children}
+      <HelpTooltip text={tooltip} detailId={detailId} />
+    </span>
   );
 }
 
@@ -78,9 +218,7 @@ function Toasts() {
   const dismissNotification = useDashboardStore((state) => state.dismissNotification);
 
   useEffect(() => {
-    const timers = notifications.map((notification) =>
-      window.setTimeout(() => dismissNotification(notification.id), 15_000)
-    );
+    const timers = notifications.map((notification) => window.setTimeout(() => dismissNotification(notification.id), 15_000));
     return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [dismissNotification, notifications]);
 
@@ -111,24 +249,34 @@ function Toasts() {
 }
 
 function Sidebar() {
+  const activeTab = useDashboardStore((state) => state.activeTab);
+  const setActiveTab = useDashboardStore((state) => state.setActiveTab);
+
   return (
     <aside className="fixed left-0 top-0 hidden h-screen w-72 border-r border-border bg-primaryDark text-white lg:block">
       <div className="border-b border-white/15 px-6 py-5">
-        <p className="text-sm font-semibold uppercase tracking-[0.08em] text-white/70">B-Universe</p>
+        <p className="text-sm font-semibold uppercase text-white/70">B-Universe</p>
         <h1 className="mt-2 text-xl font-bold leading-7">Workflow Harga Emas & Perak</h1>
       </div>
       <nav className="space-y-1 px-3 py-4">
         {menuItems.map((item) => {
           const Icon = iconMap[item as keyof typeof iconMap];
+          const active = activeTab === item;
           return (
-            <a
-              href={`#${item.toLowerCase().replaceAll(" ", "-")}`}
+            <button
+              type="button"
               key={item}
-              className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-white/80 hover:bg-white/10 hover:text-white"
+              onClick={() => setActiveTab(item)}
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium ${
+                active ? "bg-accentRed text-white" : "text-white/80 hover:bg-white/10 hover:text-white"
+              }`}
             >
               <Icon className="h-4 w-4" aria-hidden="true" />
               {item}
-            </a>
+              {item === "Data Harga Emas" && (
+                <HelpTooltip text="Menampilkan histori data harga emas dan fitur perbandingan antar tanggal." detailId="docs-data-harga" />
+              )}
+            </button>
           );
         })}
       </nav>
@@ -136,26 +284,24 @@ function Sidebar() {
   );
 }
 
-function TabNavigation() {
+function MobileNavigation() {
   const activeTab = useDashboardStore((state) => state.activeTab);
   const setActiveTab = useDashboardStore((state) => state.setActiveTab);
-
   return (
-    <div className="overflow-x-auto stable-scrollbar rounded-lg border border-border bg-surface p-2 shadow-panel">
+    <div className="overflow-x-auto stable-scrollbar rounded-lg border border-border bg-surface p-2 shadow-panel lg:hidden">
       <div className="flex min-w-max gap-2">
         {menuItems.map((item) => {
           const Icon = iconMap[item as keyof typeof iconMap];
-          const active = activeTab === item;
           return (
             <button
-              key={item}
               type="button"
+              key={item}
               onClick={() => setActiveTab(item)}
               className={`inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-semibold ${
-                active ? "bg-accentRed text-white" : "text-textSecondary hover:bg-background hover:text-textPrimary"
+                activeTab === item ? "bg-accentRed text-white" : "text-textSecondary hover:bg-background hover:text-textPrimary"
               }`}
             >
-              <Icon className="h-4 w-4" aria-hidden="true" />
+              <Icon className="h-4 w-4" />
               {item}
             </button>
           );
@@ -165,19 +311,44 @@ function TabNavigation() {
   );
 }
 
+function useSourceOptions(portal: Portal, jenisKonten: string) {
+  return useQuery({
+    queryKey: ["runtime-sources", portal, jenisKonten],
+    queryFn: async () => {
+      const params = new URLSearchParams({ portal, jenisKonten });
+      const response = await fetch(`/api/sources?${params.toString()}`);
+      const data = (await response.json()) as SourceResponse;
+      if (!response.ok) throw data;
+      return data.sources;
+    }
+  });
+}
+
 function PortalControls() {
   const portal = useDashboardStore((state) => state.portal);
   const jenisKonten = useDashboardStore((state) => state.jenisKonten);
+  const sourceName = useDashboardStore((state) => state.sourceName);
   const setPortal = useDashboardStore((state) => state.setPortal);
   const setJenisKonten = useDashboardStore((state) => state.setJenisKonten);
+  const setSourceName = useDashboardStore((state) => state.setSourceName);
+  const sourceQuery = useSourceOptions(portal, jenisKonten);
+  const sourceOptions = sourceQuery.data ?? [];
+
+  useEffect(() => {
+    if (sourceName !== ALL_SOURCES && sourceOptions.length && !sourceOptions.some((source) => source.name === sourceName)) {
+      setSourceName(ALL_SOURCES);
+    }
+  }, [setSourceName, sourceName, sourceOptions]);
 
   return (
-    <div className="grid gap-4 md:grid-cols-[220px_1fr]">
-      <label className="grid gap-2 text-sm font-semibold text-textPrimary">
-        Portal
+    <div className="grid gap-4 xl:grid-cols-[220px_1fr_280px]">
+      <label className="grid gap-2">
+        <FieldLabel tooltip="Menentukan gaya penulisan artikel. Beritasatu cepat dan ringkas, Investor Daily analitis dan market-oriented." detailId="docs-generate">
+          Portal
+        </FieldLabel>
         <select
           value={portal}
-          onChange={(event) => setPortal(event.target.value as typeof portal)}
+          onChange={(event) => setPortal(event.target.value as Portal)}
           className="h-11 rounded-lg border border-border bg-surface px-3 text-sm outline-none focus:border-primary"
         >
           {Object.keys(portalContentTypes).map((item) => (
@@ -185,8 +356,10 @@ function PortalControls() {
           ))}
         </select>
       </label>
-      <label className="grid gap-2 text-sm font-semibold text-textPrimary">
-        Jenis Konten
+      <label className="grid gap-2">
+        <FieldLabel tooltip="Menentukan template artikel yang digunakan berdasarkan jenis berita emas." detailId="docs-jenis-konten">
+          Jenis Konten
+        </FieldLabel>
         <select
           value={jenisKonten}
           onChange={(event) => setJenisKonten(event.target.value)}
@@ -197,12 +370,28 @@ function PortalControls() {
           ))}
         </select>
       </label>
+      <label className="grid gap-2">
+        <FieldLabel tooltip="Memilih sumber data harga emas yang akan digunakan." detailId="docs-source-data">
+          Source
+        </FieldLabel>
+        <select
+          value={sourceName}
+          onChange={(event) => setSourceName(event.target.value)}
+          className="h-11 rounded-lg border border-border bg-surface px-3 text-sm outline-none focus:border-primary"
+        >
+          <option>{ALL_SOURCES}</option>
+          {sourceOptions.map((source) => (
+            <option key={source.name}>{source.name}</option>
+          ))}
+        </select>
+      </label>
     </div>
   );
 }
 
 function MetricStrip() {
   const snapshots = useDashboardStore((state) => state.snapshots);
+  const rowCount = flattenPriceRows(snapshots).filter(({ row }) => row.harga || row.buyback).length;
   const successCount = snapshots.filter((snapshot) => snapshot.status === "success").length;
   const errorCount = snapshots.filter((snapshot) => snapshot.status === "error").length;
   const manualCount = snapshots.filter((snapshot) => snapshot.status === "manual").length;
@@ -211,11 +400,12 @@ function MetricStrip() {
     { label: "Source valid", value: preflightRows.filter((row) => row.dataBerhasilDitarik === "Ya").length },
     { label: "Source manual", value: preflightRows.filter((row) => row.dataBerhasilDitarik === "Manual").length },
     { label: "Run sukses", value: successCount },
+    { label: "Row harga", value: rowCount },
     { label: "Perlu tindak lanjut", value: errorCount + manualCount }
   ];
 
   return (
-    <div id="overview" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div id="overview" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
       {items.map((item) => (
         <div key={item.label} className="rounded-lg border border-border bg-surface p-4 shadow-panel">
           <p className="text-sm font-medium text-textSecondary">{item.label}</p>
@@ -226,17 +416,99 @@ function MetricStrip() {
   );
 }
 
+function PriceDataTable({ rows, emptyMessage, showContent = false }: { rows: PriceRowWithSnapshot[]; emptyMessage: string; showContent?: boolean }) {
+  return (
+    <div className="overflow-x-auto stable-scrollbar">
+      <table className="w-full min-w-[960px] border-collapse text-sm">
+        <thead>
+          <tr className="border-b border-border bg-background text-left text-textSecondary">
+            <th className="px-3 py-3 font-semibold">Source</th>
+            {showContent && <th className="px-3 py-3 font-semibold">Jenis Konten</th>}
+            <th className="px-3 py-3 font-semibold">Berat</th>
+            <th className="px-3 py-3 text-right font-semibold">Harga</th>
+            <th className="px-3 py-3 text-right font-semibold">Buyback</th>
+            <th className="px-3 py-3 font-semibold">Update Terakhir</th>
+            <th className="px-3 py-3 text-right font-semibold">
+              <span className="inline-flex items-center justify-end gap-1">
+                Delta
+                <HelpTooltip text="Delta adalah selisih harga dibanding data terakhir yang tersimpan di sistem." detailId="docs-perbandingan" />
+              </span>
+            </th>
+            <th className="px-3 py-3 text-right font-semibold">
+              <span className="inline-flex items-center justify-end gap-1">
+                % Perubahan
+                <HelpTooltip text="Persentase perubahan harga dibanding data sebelumnya." detailId="docs-perbandingan" />
+              </span>
+            </th>
+            <th className="px-3 py-3 font-semibold">Status</th>
+            <th className="px-3 py-3 font-semibold">Copy</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length ? (
+            rows.map(({ snapshot, row }) => {
+              const previousText = row.previous_snapshot_run_time
+                ? `(dibanding data ${formatDate(row.previous_snapshot_date)}, ${formatDateTime(row.previous_snapshot_run_time)})`
+                : "Belum ada snapshot pembanding.";
+              return (
+                <tr key={`${snapshot.id}-${row.id}`} className="border-b border-border/70 align-top">
+                  <td className="px-3 py-3 font-semibold text-primary">
+                    <a href={snapshot.source_url} target="_blank" rel="noreferrer">
+                      {snapshot.source_name}
+                    </a>
+                    <p className="mt-1 text-xs font-normal text-textSecondary">{formatDate(snapshot.tanggal_snapshot)}</p>
+                  </td>
+                  {showContent && <td className="px-3 py-3 text-textSecondary">{snapshot.jenis_konten}</td>}
+                  <td className="px-3 py-3 text-textSecondary">{row.berat}</td>
+                  <td className="px-3 py-3 text-right font-semibold text-textPrimary">{formatMoney(row.harga)}</td>
+                  <td className="px-3 py-3 text-right text-textSecondary">{formatMoney(row.buyback)}</td>
+                  <td className="px-3 py-3 text-textSecondary">{row.waktu_update ?? snapshot.update_time ?? "-"}</td>
+                  <td className={`px-3 py-3 text-right font-semibold ${deltaClass(row.delta)}`}>
+                    {row.delta ?? "-"}
+                    <p className="mt-1 text-xs font-normal text-textSecondary">{previousText}</p>
+                  </td>
+                  <td className={`px-3 py-3 text-right font-semibold ${deltaClass(row.percentage_change)}`}>{row.percentage_change ?? "-"}</td>
+                  <td className="px-3 py-3">
+                    <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(snapshot.status)}`}>{snapshot.status}</span>
+                  </td>
+                  <td className="px-3 py-3">
+                    <button
+                      type="button"
+                      className="grid h-8 w-8 place-items-center rounded-lg border border-border text-textSecondary"
+                      title="Copy data"
+                      aria-label="Copy data"
+                      onClick={() => navigator.clipboard.writeText(JSON.stringify({ snapshot, row }, null, 2))}
+                    >
+                      <Clipboard className="h-4 w-4" />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })
+          ) : (
+            <tr>
+              <td colSpan={showContent ? 10 : 9} className="px-3 py-10 text-center text-textSecondary">
+                {emptyMessage}
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function SourceManagement() {
   const portal = useDashboardStore((state) => state.portal);
   const jenisKonten = useDashboardStore((state) => state.jenisKonten);
   const selectedSources = contentSourceMap[portal][jenisKonten] ?? [];
 
   return (
-    <section id="source-management" className="rounded-lg border border-border bg-surface p-5 shadow-panel">
+    <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-bold text-textPrimary">Source Management</h2>
-          <p className="mt-1 text-sm text-textSecondary">Mapping source mengikuti template dan Excel yang sudah divalidasi.</p>
+          <p className="mt-1 text-sm text-textSecondary">Mapping source mengikuti template, Excel, dan pengaturan admin yang sudah divalidasi.</p>
         </div>
         <span className="rounded-full border border-primary/20 bg-primary/5 px-3 py-1 text-sm font-semibold text-primary">
           {portal} / {jenisKonten}
@@ -277,6 +549,7 @@ function SourceManagement() {
 function RunDataPanel() {
   const portal = useDashboardStore((state) => state.portal);
   const jenisKonten = useDashboardStore((state) => state.jenisKonten);
+  const sourceName = useDashboardStore((state) => state.sourceName);
   const snapshots = useDashboardStore((state) => state.snapshots);
   const setSnapshots = useDashboardStore((state) => state.setSnapshots);
   const pushNotifications = useDashboardStore((state) => state.pushNotifications);
@@ -287,7 +560,7 @@ function RunDataPanel() {
       const response = await fetch("/api/run-data", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ portal, jenisKonten })
+        body: JSON.stringify({ portal, jenisKonten, source: sourceName })
       });
       const data = (await response.json()) as RunDataResponse;
       if (!response.ok) throw data;
@@ -295,6 +568,7 @@ function RunDataPanel() {
     },
     onSuccess: (data) => {
       setSnapshots(data.snapshots);
+      queryClient.invalidateQueries({ queryKey: ["history"] });
       pushNotifications(data.notifications);
     },
     onError: (error) => {
@@ -313,11 +587,16 @@ function RunDataPanel() {
   });
 
   return (
-    <section id="run-data" className="rounded-lg border border-border bg-surface p-5 shadow-panel">
+    <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-bold text-textPrimary">Run Data</h2>
-          <p className="mt-1 text-sm text-textSecondary">RUN DATA menarik harga terbaru, menyimpan snapshot, dan membandingkan histori.</p>
+          <h2 className="inline-flex items-center gap-2 text-lg font-bold text-textPrimary">
+            Run Data
+            <HelpTooltip text="Menarik data harga emas terbaru dari source yang dipilih dan menyimpannya sebagai snapshot." detailId="docs-run-data" />
+          </h2>
+          <p className="mt-1 text-sm text-textSecondary">
+            RUN DATA bisa dipakai sendiri untuk mengambil data tanpa generate artikel. Source aktif: {sourceName}.
+          </p>
         </div>
         <button
           type="button"
@@ -329,65 +608,8 @@ function RunDataPanel() {
           RUN DATA
         </button>
       </div>
-      <div className="mt-5 overflow-x-auto stable-scrollbar">
-        <table className="w-full min-w-[1160px] border-collapse text-sm">
-          <thead>
-            <tr className="border-b border-border bg-background text-left text-textSecondary">
-              <th className="px-3 py-3 font-semibold">Source</th>
-              <th className="px-3 py-3 font-semibold">Berat</th>
-              <th className="px-3 py-3 font-semibold">Harga</th>
-              <th className="px-3 py-3 font-semibold">Buyback</th>
-              <th className="px-3 py-3 font-semibold">Waktu Update</th>
-              <th className="px-3 py-3 font-semibold">Jam Run Sistem</th>
-              <th className="px-3 py-3 font-semibold">Delta</th>
-              <th className="px-3 py-3 font-semibold">Persen Perubahan</th>
-              <th className="px-3 py-3 font-semibold">Status</th>
-              <th className="px-3 py-3 font-semibold">Copy</th>
-            </tr>
-          </thead>
-          <tbody>
-            {priceRows.length ? (
-              priceRows.map(({ snapshot, row }) => (
-                <tr key={row.id} className="border-b border-border/70 align-top">
-                  <td className="px-3 py-3 font-semibold text-primary">
-                    <a href={snapshot.source_url} target="_blank" rel="noreferrer">
-                      {snapshot.source_name}
-                    </a>
-                  </td>
-                  <td className="px-3 py-3 text-textSecondary">{row.berat}</td>
-                  <td className="px-3 py-3 font-semibold text-textPrimary">{row.harga ?? "-"}</td>
-                  <td className="px-3 py-3 text-textSecondary">{row.buyback ?? "-"}</td>
-                  <td className="px-3 py-3 text-textSecondary">{row.waktu_update ?? snapshot.update_time ?? "-"}</td>
-                  <td className="px-3 py-3 text-textSecondary">{new Date(snapshot.run_time).toLocaleString("id-ID")}</td>
-                  <td className="px-3 py-3 text-textSecondary">{row.delta ?? "-"}</td>
-                  <td className="px-3 py-3 text-textSecondary">{row.percentage_change ?? "-"}</td>
-                  <td className="px-3 py-3">
-                    <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(snapshot.status)}`}>
-                      {snapshot.status}
-                    </span>
-                  </td>
-                  <td className="px-3 py-3">
-                    <button
-                      type="button"
-                      className="grid h-8 w-8 place-items-center rounded-lg border border-border text-textSecondary"
-                      title="Copy data"
-                      aria-label="Copy data"
-                      onClick={() => navigator.clipboard.writeText(JSON.stringify({ snapshot, row }, null, 2))}
-                    >
-                      <Clipboard className="h-4 w-4" />
-                    </button>
-                  </td>
-                </tr>
-              ))
-            ) : (
-              <tr>
-                <td colSpan={10} className="px-3 py-10 text-center text-textSecondary">
-                  Belum ada data. Jalankan RUN DATA terlebih dahulu.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      <div className="mt-5">
+        <PriceDataTable rows={priceRows} emptyMessage="Belum ada data. Jalankan RUN DATA terlebih dahulu." />
       </div>
     </section>
   );
@@ -396,11 +618,16 @@ function RunDataPanel() {
 function GenerateArticlePanel() {
   const portal = useDashboardStore((state) => state.portal);
   const jenisKonten = useDashboardStore((state) => state.jenisKonten);
+  const sourceName = useDashboardStore((state) => state.sourceName);
   const snapshots = useDashboardStore((state) => state.snapshots);
   const article = useDashboardStore((state) => state.article);
   const setArticle = useDashboardStore((state) => state.setArticle);
   const pushNotifications = useDashboardStore((state) => state.pushNotifications);
-  const canGenerate = Boolean(portal && jenisKonten && snapshots.some((snapshot) => snapshot.status === "success"));
+  const usableSnapshots = useMemo(
+    () => snapshots.filter((snapshot) => snapshot.status === "success" && (sourceName === ALL_SOURCES || snapshot.source_name === sourceName)),
+    [snapshots, sourceName]
+  );
+  const canGenerate = Boolean(portal && jenisKonten && usableSnapshots.length);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -419,7 +646,7 @@ function GenerateArticlePanel() {
       const response = await fetch("/api/generate-article", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ portal, jenisKonten, snapshots })
+        body: JSON.stringify({ portal, jenisKonten, snapshots: usableSnapshots })
       });
       const data = (await response.json()) as GenerateArticleResponse;
       if (!response.ok) throw data;
@@ -445,11 +672,16 @@ function GenerateArticlePanel() {
   });
 
   return (
-    <section id="generate-artikel" className="rounded-lg border border-border bg-surface p-5 shadow-panel">
+    <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-bold text-textPrimary">Generate Artikel</h2>
-          <p className="mt-1 text-sm text-textSecondary">Gaya portal tidak dicampur: Beritasatu memakai template Beritasatu, Investor Daily memakai template Investor Daily.</p>
+          <h2 className="inline-flex items-center gap-2 text-lg font-bold text-textPrimary">
+            Generate Artikel
+            <HelpTooltip text="Menghasilkan artikel otomatis berdasarkan data terbaru, jenis konten, dan template portal yang dipilih." detailId="docs-generate" />
+          </h2>
+          <p className="mt-1 text-sm text-textSecondary">
+            Portal, jenis konten, dan source dipilih di header. Artikel hanya dibuat jika data sudah berhasil di-run.
+          </p>
         </div>
         <button
           type="button"
@@ -460,18 +692,18 @@ function GenerateArticlePanel() {
           } disabled:cursor-not-allowed disabled:opacity-70`}
         >
           {mutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
-          RUN ARTIKEL
+          GENERATE ARTIKEL
         </button>
       </div>
       {!canGenerate && (
         <div className="mt-4 flex gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
           <AlertTriangle className="h-5 w-5 shrink-0" />
-          <p>Run Artikel hanya aktif jika data sudah berhasil di-run, portal sudah dipilih, dan jenis konten sudah dipilih.</p>
+          <p>Generate artikel wajib menunggu data berhasil dimuat. Jika hanya butuh data, cukup gunakan RUN DATA.</p>
         </div>
       )}
       {article && (
-        <div id="preview-artikel" className="mt-5 rounded-lg border border-border bg-background p-5">
-          <p className="text-xs font-bold uppercase tracking-[0.12em] text-primary">Preview Artikel</p>
+        <div className="mt-5 rounded-lg border border-border bg-background p-5">
+          <p className="text-xs font-bold uppercase text-primary">Preview Artikel</p>
           <h3 className="mt-2 font-serifPreview text-3xl font-bold leading-tight text-textPrimary">{article.headline}</h3>
           <p className="mt-3 font-serifPreview text-lg leading-8 text-textPrimary">{article.lead}</p>
           {article.disclaimer && (
@@ -487,7 +719,7 @@ function GenerateArticlePanel() {
             ))}
           </div>
           <div className="mt-5">
-            <h4 className="text-sm font-bold uppercase tracking-[0.08em] text-primary">Rekomendasi Tambahan Angle untuk Editor</h4>
+            <h4 className="text-sm font-bold uppercase text-primary">Rekomendasi Tambahan Angle untuk Editor</h4>
             <ul className="mt-3 grid gap-2 text-sm text-textPrimary">
               {article.rekomendasiAngle.map((angle) => (
                 <li key={angle} className="flex gap-2">
@@ -506,12 +738,8 @@ function GenerateArticlePanel() {
 function ValidationTable() {
   return (
     <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-bold text-textPrimary">Validasi Source</h2>
-          <p className="mt-1 text-sm text-textSecondary">Hasil pre-flight dari file template, Excel, dan SOURCE perbaruan.</p>
-        </div>
-      </div>
+      <h2 className="text-lg font-bold text-textPrimary">Validasi Source</h2>
+      <p className="mt-1 text-sm text-textSecondary">Hasil pre-flight dari file template, Excel, dan SOURCE perbaruan.</p>
       <div className="mt-5 overflow-x-auto stable-scrollbar">
         <table className="w-full min-w-[880px] border-collapse text-sm">
           <thead>
@@ -542,26 +770,76 @@ function ValidationTable() {
   );
 }
 
-function AggregationPanel() {
+function DataHargaEmasPanel() {
+  const portal = useDashboardStore((state) => state.portal);
+  const jenisKonten = useDashboardStore((state) => state.jenisKonten);
+  const sourceName = useDashboardStore((state) => state.sourceName);
   const snapshots = useDashboardStore((state) => state.snapshots);
+  const setSnapshots = useDashboardStore((state) => state.setSnapshots);
+  const pushNotifications = useDashboardStore((state) => state.pushNotifications);
   const [sourceFilter, setSourceFilter] = useState("Semua");
-  const [contentFilter, setContentFilter] = useState("Semua");
   const [dateFilter, setDateFilter] = useState("");
-  const [compareA, setCompareA] = useState("");
-  const [compareB, setCompareB] = useState("");
+  const [dateA, setDateA] = useState("");
+  const [dateB, setDateB] = useState("");
 
-  const sourceOptions = useMemo(() => [...new Set(snapshots.map((snapshot) => snapshot.source_name))], [snapshots]);
-  const contentOptions = useMemo(() => [...new Set(snapshots.map((snapshot) => snapshot.jenis_konten))], [snapshots]);
+  const historyQuery = useQuery({
+    queryKey: ["history"],
+    queryFn: async () => {
+      const response = await fetch("/api/history");
+      const data = (await response.json()) as HistoryResponse;
+      if (!response.ok) throw data;
+      return data.snapshots;
+    }
+  });
+
+  const runMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch("/api/run-data", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ portal, jenisKonten, source: sourceName })
+      });
+      const data = (await response.json()) as RunDataResponse;
+      if (!response.ok) throw data;
+      return data;
+    },
+    onSuccess: (data) => {
+      setSnapshots(data.snapshots);
+      queryClient.invalidateQueries({ queryKey: ["history"] });
+      pushNotifications(data.notifications);
+    },
+    onError: () => {
+      pushNotifications([
+        {
+          id: crypto.randomUUID(),
+          kind: "error",
+          title: "Ambil data gagal",
+          message: "Data harga tidak dapat ditarik karena kesalahan sistem."
+        }
+      ]);
+    }
+  });
+
+  const allSnapshots = useMemo(() => dedupeSnapshots([...(snapshots ?? []), ...(historyQuery.data ?? [])]), [historyQuery.data, snapshots]);
+  const sourceOptions = useMemo(() => [...new Set(allSnapshots.map((snapshot) => snapshot.source_name))], [allSnapshots]);
+  const dateOptions = useMemo(() => [...new Set(allSnapshots.map((snapshot) => snapshot.tanggal_snapshot))].sort().reverse(), [allSnapshots]);
   const filteredSnapshots = useMemo(
     () =>
-      snapshots.filter((snapshot) => {
+      allSnapshots.filter((snapshot) => {
         const sourceMatch = sourceFilter === "Semua" || snapshot.source_name === sourceFilter;
-        const contentMatch = contentFilter === "Semua" || snapshot.jenis_konten === contentFilter;
         const dateMatch = !dateFilter || snapshot.tanggal_snapshot === dateFilter;
-        return sourceMatch && contentMatch && dateMatch;
+        return sourceMatch && dateMatch;
       }),
-    [contentFilter, dateFilter, snapshots, sourceFilter]
+    [allSnapshots, dateFilter, sourceFilter]
   );
+
+  const latestBySource = useMemo(() => {
+    const grouped = new Map<string, GoldPriceSnapshot>();
+    for (const snapshot of [...allSnapshots].sort((a, b) => b.run_time.localeCompare(a.run_time))) {
+      if (!grouped.has(snapshot.source_name)) grouped.set(snapshot.source_name, snapshot);
+    }
+    return [...grouped.values()];
+  }, [allSnapshots]);
 
   const grouped = useMemo(
     () =>
@@ -572,27 +850,56 @@ function AggregationPanel() {
     [filteredSnapshots]
   );
 
-  const compareSummary = useMemo(() => {
-    if (!compareA || !compareB || compareA === compareB) return null;
-    const rowA = snapshots.find((snapshot) => snapshot.source_name === compareA)?.price_rows.find((row) => row.harga);
-    const rowB = snapshots.find((snapshot) => snapshot.source_name === compareB)?.price_rows.find((row) => row.harga);
-    if (!rowA || !rowB) return "Data pembanding belum lengkap untuk dua source yang dipilih.";
-    return `${compareA} ${rowA.berat}: ${rowA.harga}. ${compareB} ${rowB.berat}: ${rowB.harga}.`;
-  }, [compareA, compareB, snapshots]);
+  const comparisonRows = useMemo(() => {
+    if (!dateA || !dateB) return [];
+    const snapshotsA = allSnapshots.filter((snapshot) => snapshot.tanggal_snapshot === dateA && (sourceFilter === "Semua" || snapshot.source_name === sourceFilter));
+    const snapshotsB = allSnapshots.filter((snapshot) => snapshot.tanggal_snapshot === dateB && (sourceFilter === "Semua" || snapshot.source_name === sourceFilter));
+    const rowsA = flattenPriceRows(snapshotsA);
+    const rowsB = flattenPriceRows(snapshotsB);
+    return rowsA
+      .map(({ snapshot, row }) => {
+        const match = rowsB.find((candidate) => candidate.snapshot.source_name === snapshot.source_name && candidate.row.berat.toLowerCase() === row.berat.toLowerCase());
+        if (!match) return null;
+        const comparison = formatDeltaFromNumbers(match.row.harga, row.harga);
+        return {
+          key: `${snapshot.source_name}-${row.berat}`,
+          source: snapshot.source_name,
+          berat: row.berat,
+          hargaA: row.harga,
+          hargaB: match.row.harga,
+          delta: comparison.delta,
+          percentage: comparison.percentage
+        };
+      })
+      .filter(Boolean) as Array<{ key: string; source: string; berat: string; hargaA: string | null; hargaB: string | null; delta: string | null; percentage: string | null }>;
+  }, [allSnapshots, dateA, dateB, sourceFilter]);
 
   return (
-    <section id="himpunan-data-harga" className="rounded-lg border border-border bg-surface p-5 shadow-panel">
+    <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-bold text-textPrimary">Himpunan Data Harga</h2>
-          <p className="mt-1 text-sm text-textSecondary">Agregasi semua data harga per source untuk filter, review, dan bahan artikel multi-source.</p>
+          <h2 className="inline-flex items-center gap-2 text-lg font-bold text-textPrimary">
+            Data Harga Emas
+            <HelpTooltip text="Menampilkan histori data harga emas dan fitur perbandingan antar tanggal." detailId="docs-data-harga" />
+          </h2>
+          <p className="mt-1 text-sm text-textSecondary">Pusat data untuk melihat histori, scraping manual, grouping per source, dan compare tanggal.</p>
         </div>
-        <Filter className="h-5 w-5 text-accentRed" aria-hidden="true" />
+        <button
+          type="button"
+          onClick={() => runMutation.mutate()}
+          disabled={runMutation.isPending}
+          className="inline-flex h-11 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-semibold text-white disabled:opacity-70"
+        >
+          {runMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+          Ambil Data Sekarang
+        </button>
       </div>
 
-      <div className="mt-5 grid gap-3 lg:grid-cols-4">
-        <label className="grid gap-2 text-sm font-semibold text-textPrimary">
-          Source
+      <div className="mt-5 grid gap-3 xl:grid-cols-4">
+        <label className="grid gap-2">
+          <FieldLabel tooltip="Memilih source untuk melihat histori atau membatasi perbandingan data." detailId="docs-source-data">
+            Filter Source
+          </FieldLabel>
           <select className="h-11 rounded-lg border border-border bg-background px-3 text-sm" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
             <option>Semua</option>
             {sourceOptions.map((source) => (
@@ -601,40 +908,75 @@ function AggregationPanel() {
           </select>
         </label>
         <label className="grid gap-2 text-sm font-semibold text-textPrimary">
-          Jenis Konten
-          <select className="h-11 rounded-lg border border-border bg-background px-3 text-sm" value={contentFilter} onChange={(event) => setContentFilter(event.target.value)}>
-            <option>Semua</option>
-            {contentOptions.map((content) => (
-              <option key={content}>{content}</option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-2 text-sm font-semibold text-textPrimary">
-          Tanggal
+          Filter Tanggal
           <input className="h-11 rounded-lg border border-border bg-background px-3 text-sm" type="date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)} />
         </label>
-        <label className="grid gap-2 text-sm font-semibold text-textPrimary">
-          Jumlah Row
-          <input className="h-11 rounded-lg border border-border bg-background px-3 text-sm" readOnly value={flattenPriceRows(filteredSnapshots).length} />
+        <label className="grid gap-2">
+          <FieldLabel tooltip="Membandingkan harga emas antara dua tanggal yang dipilih." detailId="docs-perbandingan">
+            Tanggal A
+          </FieldLabel>
+          <input className="h-11 rounded-lg border border-border bg-background px-3 text-sm" type="date" value={dateA} onChange={(event) => setDateA(event.target.value)} />
+        </label>
+        <label className="grid gap-2">
+          <FieldLabel tooltip="Membandingkan harga emas antara dua tanggal yang dipilih." detailId="docs-perbandingan">
+            Tanggal B
+          </FieldLabel>
+          <input className="h-11 rounded-lg border border-border bg-background px-3 text-sm" type="date" value={dateB} onChange={(event) => setDateB(event.target.value)} />
         </label>
       </div>
 
-      <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_1fr_auto]">
-        <select className="h-11 rounded-lg border border-border bg-background px-3 text-sm" value={compareA} onChange={(event) => setCompareA(event.target.value)}>
-          <option value="">Compare source A</option>
-          {sourceOptions.map((source) => (
-            <option key={source}>{source}</option>
-          ))}
-        </select>
-        <select className="h-11 rounded-lg border border-border bg-background px-3 text-sm" value={compareB} onChange={(event) => setCompareB(event.target.value)}>
-          <option value="">Compare source B</option>
-          {sourceOptions.map((source) => (
-            <option key={source}>{source}</option>
-          ))}
-        </select>
-        <div className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-textSecondary">
-          {compareSummary ?? "Pilih dua source untuk compare antar source."}
+      <div className="mt-5 rounded-lg border border-border bg-background p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 className="text-base font-bold text-primary">Data Terbaru per Source</h3>
+          <span className="text-sm text-textSecondary">{latestBySource.length} source</span>
         </div>
+        <div className="mt-3">
+          <PriceDataTable rows={flattenPriceRows(latestBySource)} emptyMessage="Belum ada data terbaru. Klik Ambil Data Sekarang." showContent />
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-lg border border-border bg-background p-4">
+        <div className="flex items-center gap-2">
+          <h3 className="text-base font-bold text-primary">Comparison Feature</h3>
+          <HelpTooltip text="Delta membandingkan harga Tanggal B terhadap Tanggal A." detailId="docs-perbandingan" />
+        </div>
+        <div className="mt-3 overflow-x-auto stable-scrollbar">
+          <table className="w-full min-w-[760px] border-collapse text-sm">
+            <thead>
+              <tr className="border-b border-border text-left text-textSecondary">
+                <th className="px-3 py-3 font-semibold">Source</th>
+                <th className="px-3 py-3 font-semibold">Berat</th>
+                <th className="px-3 py-3 text-right font-semibold">Harga Tanggal A</th>
+                <th className="px-3 py-3 text-right font-semibold">Harga Tanggal B</th>
+                <th className="px-3 py-3 text-right font-semibold">Delta</th>
+                <th className="px-3 py-3 text-right font-semibold">% Perubahan</th>
+              </tr>
+            </thead>
+            <tbody>
+              {comparisonRows.length ? (
+                comparisonRows.map((row) => (
+                  <tr key={row.key} className="border-b border-border/70">
+                    <td className="px-3 py-3 font-semibold text-primary">{row.source}</td>
+                    <td className="px-3 py-3 text-textSecondary">{row.berat}</td>
+                    <td className="px-3 py-3 text-right font-semibold text-textPrimary">{formatMoney(row.hargaA)}</td>
+                    <td className="px-3 py-3 text-right font-semibold text-textPrimary">{formatMoney(row.hargaB)}</td>
+                    <td className={`px-3 py-3 text-right font-semibold ${deltaClass(row.delta)}`}>{row.delta ?? "-"}</td>
+                    <td className={`px-3 py-3 text-right font-semibold ${deltaClass(row.percentage)}`}>{row.percentage ?? "-"}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={6} className="px-3 py-8 text-center text-textSecondary">
+                    Pilih dua tanggal yang sudah memiliki snapshot untuk melihat perbandingan.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {dateOptions.length > 0 && (
+          <p className="mt-3 text-xs text-textSecondary">Tanggal tersedia: {dateOptions.slice(0, 8).map(formatDate).join(", ")}</p>
+        )}
       </div>
 
       <div className="mt-5 grid gap-4">
@@ -643,39 +985,16 @@ function AggregationPanel() {
             <div key={source} className="rounded-lg border border-border bg-background p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <h3 className="text-base font-bold text-primary">Source: {source}</h3>
-                <span className="text-sm text-textSecondary">{flattenPriceRows(sourceSnapshots).length} row harga</span>
+                <span className="text-sm text-textSecondary">{flattenPriceRows(sourceSnapshots).length} row harga historis</span>
               </div>
-              <div className="mt-3 overflow-x-auto stable-scrollbar">
-                <table className="w-full min-w-[760px] border-collapse text-sm">
-                  <thead>
-                    <tr className="border-b border-border text-left text-textSecondary">
-                      <th className="px-3 py-2 font-semibold">Jenis Konten</th>
-                      <th className="px-3 py-2 font-semibold">Berat</th>
-                      <th className="px-3 py-2 font-semibold">Harga</th>
-                      <th className="px-3 py-2 font-semibold">Buyback</th>
-                      <th className="px-3 py-2 font-semibold">Update</th>
-                      <th className="px-3 py-2 font-semibold">Delta</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {flattenPriceRows(sourceSnapshots).map(({ snapshot, row }) => (
-                      <tr key={row.id} className="border-b border-border/70">
-                        <td className="px-3 py-2 text-textSecondary">{snapshot.jenis_konten}</td>
-                        <td className="px-3 py-2 text-textSecondary">{row.berat}</td>
-                        <td className="px-3 py-2 font-semibold text-textPrimary">{row.harga ?? "-"}</td>
-                        <td className="px-3 py-2 text-textSecondary">{row.buyback ?? "-"}</td>
-                        <td className="px-3 py-2 text-textSecondary">{row.waktu_update ?? "-"}</td>
-                        <td className="px-3 py-2 text-textSecondary">{row.delta ?? "-"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="mt-3">
+                <PriceDataTable rows={flattenPriceRows(sourceSnapshots)} emptyMessage="Tidak ada data untuk filter ini." showContent />
               </div>
             </div>
           ))
         ) : (
           <div className="rounded-lg border border-dashed border-border bg-background p-8 text-center text-sm text-textSecondary">
-            Belum ada himpunan data. Jalankan RUN DATA untuk mengisi agregasi harga.
+            Belum ada histori data. Jalankan RUN DATA atau Ambil Data Sekarang.
           </div>
         )}
       </div>
@@ -683,63 +1002,196 @@ function AggregationPanel() {
   );
 }
 
-function SupportingPanels({ mode }: { mode: "histori" | "pengaturan" }) {
+function HistoriPanel() {
   const snapshots = useDashboardStore((state) => state.snapshots);
   const latestSuccess = useMemo(() => snapshots.filter((snapshot) => snapshot.status === "success"), [snapshots]);
-  const [uploadResult, setUploadResult] = useState<string>("Belum ada file baru yang diproses.");
+  return (
+    <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
+      <h2 className="text-lg font-bold text-textPrimary">Histori Data</h2>
+      <p className="mt-1 text-sm text-textSecondary">Snapshot tidak dioverwrite. Histori lengkap juga tersedia di tab Data Harga Emas.</p>
+      <div className="mt-4">
+        <PriceDataTable rows={flattenPriceRows(latestSuccess)} emptyMessage="Histori sesi ini akan muncul setelah RUN DATA." showContent />
+      </div>
+    </section>
+  );
+}
 
-  async function handleUpload(file: File | undefined) {
-    if (!file) return;
-    const form = new FormData();
-    form.set("file", file);
-    const response = await fetch("/api/upload-template", { method: "POST", body: form });
-    const data = await response.json();
-    setUploadResult(data.ok ? `File ${file.name} berhasil dibaca.` : data.message);
+type DocSection = {
+  id: string;
+  title: string;
+  body: string[];
+  callouts?: Array<{ label: string; text: string; kind: "tips" | "penting" | "catatan" }>;
+};
+
+const documentationSections: DocSection[] = [
+  {
+    id: "docs-introduction",
+    title: "Introduction",
+    body: [
+      "Dashboard ini dibuat untuk membantu redaksi Beritasatu dan Investor Daily mengelola konten repetitif harga emas dan perak.",
+      "Pengguna utamanya adalah editor, data analyst, dan tim newsroom yang membutuhkan data harga terbaru, histori snapshot, perbandingan harga, serta draft artikel otomatis."
+    ],
+    callouts: [{ label: "Penting", text: "Source dan template bisa diperbarui lewat Pengaturan tanpa redeploy.", kind: "penting" }]
+  },
+  {
+    id: "docs-cara-pakai",
+    title: "Cara Menggunakan Dashboard",
+    body: [
+      "Flow sederhana: pilih portal, pilih jenis konten, pilih source, klik RUN DATA, lalu klik GENERATE ARTIKEL jika artikel diperlukan.",
+      "Jika editor hanya butuh tabel harga untuk pengecekan, proses berhenti di RUN DATA."
+    ],
+    callouts: [{ label: "Tips", text: "Gunakan Semua Source untuk artikel multi-source, atau pilih satu source untuk update data spesifik.", kind: "tips" }]
+  },
+  {
+    id: "docs-run-data",
+    title: "Run Data",
+    body: [
+      "RUN DATA menarik data harga emas terbaru dari source yang dipilih dan menyimpannya sebagai snapshot.",
+      "Hasilnya berupa tabel Source, Berat, Harga, Buyback, Update Terakhir, Delta, dan Persentase Perubahan."
+    ]
+  },
+  {
+    id: "docs-generate",
+    title: "Generate Artikel",
+    body: [
+      "Generate artikel wajib memilih portal terlebih dahulu karena gaya tulisan Beritasatu dan Investor Daily tidak dicampur.",
+      "Jenis konten menentukan template artikel. Source menentukan data yang digunakan untuk narasi dan daftar harga."
+    ],
+    callouts: [{ label: "Catatan", text: "Jika data belum berhasil di-run, tombol generate akan memberi warning dan proses diblokir.", kind: "catatan" }]
+  },
+  {
+    id: "docs-jenis-konten",
+    title: "Jenis Konten",
+    body: [
+      "Harga Emas Dunia menggunakan template market/global: pembukaan kondisi global, harga spot emas, dan sentimen pasar.",
+      "Harga Emas Antam menggunakan template harga harian: harga terbaru, perbandingan kemarin, dan list harga per gram.",
+      "Harga Emas ANTAM, UBS, Galeri 24 menggunakan template perbandingan multi-source untuk membantu editor melihat variasi harga antar penyedia."
+    ]
+  },
+  {
+    id: "docs-source-data",
+    title: "Source Data",
+    body: [
+      "Logam Mulia digunakan untuk Harga Emas dan Harga Perak Beritasatu serta Harga Emas Antam Investor Daily.",
+      "Kitco, Investing, dan CNBC Metals digunakan untuk Harga Emas Dunia. CNBC saat ini dicatat manual.",
+      "Pegadaian digunakan untuk artikel multi-source Antam, UBS, dan Galeri 24. Galeri24 diambil dari tabel Pegadaian.",
+      "Laku Emas, Indogold, ShariaCoin, dan Treasury digunakan untuk Harga Emas Digital. Treasury saat ini manual."
+    ]
+  },
+  {
+    id: "docs-data-harga",
+    title: "Data Harga Emas",
+    body: [
+      "Tab Data Harga Emas digunakan untuk melihat data terbaru per source, histori snapshot, grouping source, dan scraping manual lewat tombol Ambil Data Sekarang.",
+      "Gunakan filter source dan tanggal untuk mempersempit tabel ketika histori sudah banyak."
+    ]
+  },
+  {
+    id: "docs-perbandingan",
+    title: "Perbandingan Data",
+    body: [
+      "Delta adalah selisih harga dibanding data terakhir yang tersimpan di sistem.",
+      "Persentase perubahan menunjukkan perubahan harga dalam persen dibanding snapshot sebelumnya atau tanggal pembanding.",
+      "Pada Comparison Feature, Tanggal B dibandingkan terhadap Tanggal A."
+    ]
+  },
+  {
+    id: "docs-troubleshooting",
+    title: "Troubleshooting",
+    body: [
+      "Jika data tidak muncul, cek apakah source dipilih benar dan source sedang aktif di Pengaturan Source.",
+      "Jika source gagal load, buka Monitoring Source untuk melihat error log dan periksa selector element.",
+      "Jika artikel tidak bisa generate, jalankan RUN DATA terlebih dahulu sampai minimal satu source berhasil."
+    ],
+    callouts: [{ label: "Tips", text: "Untuk source manual seperti CNBC, Treasury, Emasku, Mini Gold, dan HRTA Gold, editor tetap perlu input atau cek manual.", kind: "tips" }]
   }
+];
+
+function DocumentationPanel() {
+  const [query, setQuery] = useState("");
+  const [activeDoc, setActiveDoc] = useState(documentationSections[0].id);
+  const filteredDocs = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    if (!keyword) return documentationSections;
+    return documentationSections.filter((section) => `${section.title} ${section.body.join(" ")}`.toLowerCase().includes(keyword));
+  }, [query]);
+
+  const calloutClass = {
+    tips: "border-emerald-200 bg-emerald-50 text-emerald-800",
+    penting: "border-red-200 bg-red-50 text-red-800",
+    catatan: "border-amber-200 bg-amber-50 text-amber-800"
+  };
 
   return (
-    <div className={mode === "pengaturan" ? "grid gap-5" : "grid gap-5 xl:grid-cols-2"}>
-      {mode === "histori" && (
-        <>
-          <section id="histori-data" className="rounded-lg border border-border bg-surface p-5 shadow-panel">
-            <h2 className="text-lg font-bold text-textPrimary">Histori Data</h2>
-            <p className="mt-1 text-sm text-textSecondary">Snapshot tidak dioverwrite. Database PostgreSQL siap melalui DATABASE_URL.</p>
-            <div className="mt-4 grid gap-3">
-              {latestSuccess.slice(0, 4).map((snapshot) => (
-                <div key={snapshot.id} className="rounded-lg border border-border bg-background p-3">
-                  <p className="text-sm font-semibold text-textPrimary">{snapshot.source_name}</p>
-                  <p className="mt-1 text-sm text-textSecondary">
-                    {snapshot.tanggal_snapshot} / {snapshot.harga_terbaru} / {snapshot.price_rows.length} row
-                  </p>
+    <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-textPrimary">Documentation</h2>
+          <p className="mt-1 text-sm text-textSecondary">User guide interaktif untuk editor non-technical.</p>
+        </div>
+        <label className="flex h-11 min-w-[280px] items-center gap-2 rounded-lg border border-border bg-background px-3">
+          <Search className="h-4 w-4 text-textSecondary" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            className="min-w-0 flex-1 bg-transparent text-sm outline-none"
+            placeholder="Search documentation"
+          />
+        </label>
+      </div>
+
+      <div className="mt-5 grid gap-5 lg:grid-cols-[280px_1fr]">
+        <aside className="lg:sticky lg:top-5 lg:self-start">
+          <nav className="grid gap-2 rounded-lg border border-border bg-background p-3">
+            {filteredDocs.map((section) => (
+              <a
+                key={section.id}
+                href={`#${section.id}`}
+                onClick={() => setActiveDoc(section.id)}
+                className={`rounded-md px-3 py-2 text-sm font-semibold ${
+                  activeDoc === section.id ? "bg-accentRed text-white" : "text-textSecondary hover:bg-surface hover:text-textPrimary"
+                }`}
+              >
+                {section.title}
+              </a>
+            ))}
+          </nav>
+        </aside>
+        <div className="grid gap-4">
+          {filteredDocs.map((section) => (
+            <article key={section.id} id={section.id} className="rounded-lg border border-border bg-background p-5">
+              <h3 className="text-xl font-bold text-primary">{section.title}</h3>
+              <div className="mt-3 grid gap-3 text-sm leading-6 text-textPrimary">
+                {section.body.map((paragraph) => (
+                  <p key={paragraph}>{paragraph}</p>
+                ))}
+              </div>
+              {section.callouts?.map((callout) => (
+                <div key={callout.text} className={`mt-4 rounded-lg border p-4 text-sm leading-6 ${calloutClass[callout.kind]}`}>
+                  <p className="font-bold">{callout.label}</p>
+                  <p className="mt-1">{callout.text}</p>
                 </div>
               ))}
-              {!latestSuccess.length && <p className="text-sm text-textSecondary">Histori akan muncul setelah RUN DATA.</p>}
-            </div>
-          </section>
-          <section id="compare-tanggal" className="rounded-lg border border-border bg-surface p-5 shadow-panel">
-            <h2 className="text-lg font-bold text-textPrimary">Compare Tanggal</h2>
-            <p className="mt-1 text-sm text-textSecondary">Perbandingan otomatis aktif setelah snapshot hari sebelumnya tersedia.</p>
-            <div className="mt-4 grid grid-cols-2 gap-3">
-              <input className="h-11 rounded-lg border border-border bg-background px-3 text-sm" type="date" />
-              <input className="h-11 rounded-lg border border-border bg-background px-3 text-sm" type="date" />
-            </div>
-          </section>
-        </>
-      )}
-      {mode === "pengaturan" && (
-        <>
-          <AdminCMSPanel />
-          <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
-            <h2 className="text-lg font-bold text-textPrimary">Deployment Public Server</h2>
-            <div className="mt-4 grid gap-3 text-sm leading-6 text-textSecondary">
-              <p>Project compatible dengan Vercel: Next.js App Router, API routes Node.js, Tailwind CSS, dan PostgreSQL melalui DATABASE_URL.</p>
-              <p>Setelah deploy, perubahan source dan template dilakukan dari Admin CMS, disimpan ke database, lalu langsung dipakai RUN DATA dan RUN ARTIKEL tanpa rebuild.</p>
-              <p>Untuk proteksi panel admin di URL publik, set env ADMIN_TOKEN di Vercel lalu isi token yang sama di field ADMIN_TOKEN dashboard.</p>
-              <p>Manual source sementara: CNBC Metals, Treasury, Emasku, Mini Gold, dan HRTA Gold.</p>
-            </div>
-          </section>
-        </>
-      )}
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SettingsPanel() {
+  return (
+    <div className="grid gap-5">
+      <AdminCMSPanel />
+      <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
+        <h2 className="text-lg font-bold text-textPrimary">Deployment Public Server</h2>
+        <div className="mt-4 grid gap-3 text-sm leading-6 text-textSecondary">
+          <p>Project compatible dengan Vercel: Next.js App Router, API routes Node.js, Tailwind CSS, dan PostgreSQL melalui DATABASE_URL.</p>
+          <p>Perubahan source dan template harian dilakukan dari Admin CMS. Perubahan UI/UX dilakukan lewat update code GitHub lalu Vercel auto redeploy.</p>
+          <p>Manual source sementara: CNBC Metals, Treasury, Emasku, Mini Gold, dan HRTA Gold.</p>
+        </div>
+      </section>
     </div>
   );
 }
@@ -756,10 +1208,10 @@ function Dashboard() {
           <header className="rounded-lg border border-border bg-surface p-5 shadow-panel">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <p className="text-sm font-bold uppercase tracking-[0.12em] text-accentRed">Editorial Automation</p>
+                <p className="text-sm font-bold uppercase text-accentRed">Editorial Automation</p>
                 <h1 className="mt-2 text-2xl font-bold text-textPrimary">Dashboard Harga Emas & Perak</h1>
                 <p className="mt-2 max-w-3xl text-sm leading-6 text-textSecondary">
-                  Sistem menunggu RUN DATA sebelum RUN ARTIKEL, memisahkan style Beritasatu dan Investor Daily, serta menampilkan notifikasi jika source gagal.
+                  Pilih portal, jenis konten, dan source. RUN DATA bisa berdiri sendiri, GENERATE ARTIKEL memakai data yang sudah berhasil dimuat.
                 </p>
               </div>
               <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
@@ -771,7 +1223,9 @@ function Dashboard() {
               <PortalControls />
             </div>
           </header>
-          <TabNavigation />
+
+          <MobileNavigation />
+
           {activeTab === "Overview" && (
             <>
               <MetricStrip />
@@ -781,9 +1235,10 @@ function Dashboard() {
           )}
           {activeTab === "Run Data" && <RunDataPanel />}
           {activeTab === "Generate Artikel" && <GenerateArticlePanel />}
-          {activeTab === "Himpunan Data Harga" && <AggregationPanel />}
-          {activeTab === "Histori" && <SupportingPanels mode="histori" />}
-          {activeTab === "Pengaturan" && <SupportingPanels mode="pengaturan" />}
+          {activeTab === "Data Harga Emas" && <DataHargaEmasPanel />}
+          {activeTab === "Histori" && <HistoriPanel />}
+          {activeTab === "Documentation" && <DocumentationPanel />}
+          {activeTab === "Pengaturan" && <SettingsPanel />}
         </div>
       </main>
     </div>

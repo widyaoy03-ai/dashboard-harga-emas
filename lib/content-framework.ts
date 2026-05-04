@@ -16,8 +16,9 @@ export const menuItems = [
   "Overview",
   "Run Data",
   "Generate Artikel",
-  "Himpunan Data Harga",
+  "Data Harga Emas",
   "Histori",
+  "Documentation",
   "Pengaturan"
 ];
 

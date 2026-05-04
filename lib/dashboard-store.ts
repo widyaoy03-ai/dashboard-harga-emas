@@ -8,6 +8,7 @@ const NOTIFICATION_TTL = 15_000;
 interface DashboardState {
   portal: Portal;
   jenisKonten: string;
+  sourceName: string;
   activeTab: string;
   snapshots: GoldPriceSnapshot[];
   article: GeneratedArticle | null;
@@ -15,6 +16,7 @@ interface DashboardState {
   setActiveTab: (activeTab: string) => void;
   setPortal: (portal: Portal) => void;
   setJenisKonten: (jenisKonten: string) => void;
+  setSourceName: (sourceName: string) => void;
   setSnapshots: (snapshots: GoldPriceSnapshot[]) => void;
   setArticle: (article: GeneratedArticle | null) => void;
   pushNotifications: (notifications: DashboardNotification[]) => void;
@@ -24,6 +26,7 @@ interface DashboardState {
 export const useDashboardStore = create<DashboardState>((set) => ({
   portal: "Investor Daily",
   jenisKonten: "Harga Emas Dunia",
+  sourceName: "Semua Source",
   activeTab: "Overview",
   snapshots: [],
   article: null,
@@ -41,10 +44,12 @@ export const useDashboardStore = create<DashboardState>((set) => ({
     set(() => ({
       portal,
       jenisKonten: portal === "Beritasatu" ? "Harga Emas" : "Harga Emas Dunia",
+      sourceName: "Semua Source",
       snapshots: [],
       article: null
     })),
-  setJenisKonten: (jenisKonten) => set({ jenisKonten, snapshots: [], article: null }),
+  setJenisKonten: (jenisKonten) => set({ jenisKonten, sourceName: "Semua Source", snapshots: [], article: null }),
+  setSourceName: (sourceName) => set({ sourceName, snapshots: [], article: null }),
   setSnapshots: (snapshots) => set({ snapshots }),
   setArticle: (article) => set({ article }),
   pushNotifications: (notifications) =>

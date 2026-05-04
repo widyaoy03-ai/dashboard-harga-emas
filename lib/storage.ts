@@ -93,13 +93,15 @@ export async function getHistoricalSnapshots() {
     await client.connect();
     try {
       await ensureTables(client);
-      const result = await client.query<GoldPriceSnapshot>(
+      const result = await client.query<Record<string, unknown>>(
         "SELECT * FROM gold_price_snapshots ORDER BY run_time DESC LIMIT 500"
       );
       return result.rows.map((row) => ({
         ...row,
+        run_time: row.run_time instanceof Date ? row.run_time.toISOString() : row.run_time,
+        tanggal_snapshot: row.tanggal_snapshot instanceof Date ? row.tanggal_snapshot.toISOString().slice(0, 10) : row.tanggal_snapshot,
         price_rows: Array.isArray(row.price_rows) ? row.price_rows : []
-      }));
+      })) as GoldPriceSnapshot[];
     } finally {
       await client.end();
     }

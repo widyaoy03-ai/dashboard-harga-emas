@@ -90,3 +90,24 @@ Perubahan source dan template disimpan ke database dan langsung digunakan oleh `
 3. Set `DATABASE_URL`, `DATABASE_SSL`, dan `ADMIN_TOKEN`.
 4. Vercel akan auto redeploy setiap ada update code.
 5. Untuk revisi source/template harian, gunakan Admin CMS tanpa push code baru.
+
+## Update UI/UX Setelah Live
+
+Perubahan source, selector, template artikel, dan histori dapat dilakukan dari Admin CMS tanpa redeploy. Perubahan UI/UX, layout, menu, table, tooltip, atau logic aplikasi tetap perlu update code.
+
+Alur update code:
+
+```bash
+git add .
+git commit -m "revise dashboard logic"
+git push origin main
+```
+
+Jika memakai GitHub web:
+
+1. Upload file yang berubah ke repository.
+2. Isi commit message, misalnya `revise dashboard logic`.
+3. Commit ke branch `main`.
+4. Buka Vercel project, tab `Deployments`.
+5. Pastikan deployment terbaru berstatus `Ready`.
+6. Buka URL `.vercel.app` dan cek fitur yang direvisi.

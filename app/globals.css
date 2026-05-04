@@ -45,3 +45,12 @@ textarea {
   overflow-x: auto;
   scrollbar-gutter: stable;
 }
+
+table {
+  font-variant-numeric: tabular-nums;
+}
+
+td,
+th {
+  vertical-align: top;
+}
