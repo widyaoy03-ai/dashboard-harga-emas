@@ -9,6 +9,7 @@ interface DashboardState {
   portal: Portal;
   jenisKonten: string;
   sourceName: string;
+  selectedSources: string[];
   activeTab: string;
   snapshots: GoldPriceSnapshot[];
   article: GeneratedArticle | null;
@@ -17,6 +18,7 @@ interface DashboardState {
   setPortal: (portal: Portal) => void;
   setJenisKonten: (jenisKonten: string) => void;
   setSourceName: (sourceName: string) => void;
+  setSelectedSources: (selectedSources: string[]) => void;
   setSnapshots: (snapshots: GoldPriceSnapshot[]) => void;
   setArticle: (article: GeneratedArticle | null) => void;
   pushNotifications: (notifications: DashboardNotification[]) => void;
@@ -27,6 +29,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   portal: "Investor Daily",
   jenisKonten: "Harga Emas Dunia",
   sourceName: "Semua Source",
+  selectedSources: [],
   activeTab: "Overview",
   snapshots: [],
   article: null,
@@ -45,11 +48,13 @@ export const useDashboardStore = create<DashboardState>((set) => ({
       portal,
       jenisKonten: portal === "Beritasatu" ? "Harga Emas" : "Harga Emas Dunia",
       sourceName: "Semua Source",
+      selectedSources: [],
       snapshots: [],
       article: null
     })),
-  setJenisKonten: (jenisKonten) => set({ jenisKonten, sourceName: "Semua Source", snapshots: [], article: null }),
-  setSourceName: (sourceName) => set({ sourceName, snapshots: [], article: null }),
+  setJenisKonten: (jenisKonten) => set({ jenisKonten, sourceName: "Semua Source", selectedSources: [], snapshots: [], article: null }),
+  setSourceName: (sourceName) => set({ sourceName, selectedSources: sourceName === "Semua Source" ? [] : [sourceName], snapshots: [], article: null }),
+  setSelectedSources: (selectedSources) => set({ selectedSources, sourceName: selectedSources.length === 1 ? selectedSources[0] : "Semua Source", snapshots: [], article: null }),
   setSnapshots: (snapshots) => set({ snapshots }),
   setArticle: (article) => set({ article }),
   pushNotifications: (notifications) =>

@@ -45,9 +45,22 @@ function htmlCellText(cell: string) {
   return stripTags(cell).replace(/\s+/g, " ").trim();
 }
 
-function tableRowsFromHtml(html: string) {
+function scopedHtmlForSelector(html: string, selector?: string) {
+  if (!selector) return html;
+  const tableClass = selector.match(/table\.([a-z0-9_-]+)/i)?.[1];
+  if (!tableClass) return html;
+
+  const tablePattern = /<table\b[^>]*>[\s\S]*?<\/table>/gi;
+  const matchedTables = [...html.matchAll(tablePattern)]
+    .map((match) => match[0])
+    .filter((tableHtml) => new RegExp(`class=["'][^"']*\\b${tableClass}\\b`, "i").test(tableHtml));
+
+  return matchedTables.length ? matchedTables.join("\n") : html;
+}
+
+function tableRowsFromHtml(html: string, selector?: string) {
   const rows: string[][] = [];
-  const cleanHtml = html.replace(/<!--[\s\S]*?-->/g, " ");
+  const cleanHtml = scopedHtmlForSelector(html, selector).replace(/<!--[\s\S]*?-->/g, " ");
   for (const rowMatch of cleanHtml.matchAll(/<tr[\s\S]*?<\/tr>/gi)) {
     const rowHtml = rowMatch[0];
     const cells = [...rowHtml.matchAll(/<(?:td|th)[^>]*>([\s\S]*?)<\/(?:td|th)>/gi)]
@@ -73,6 +86,11 @@ function normalizeWeight(value: string) {
 
 function looksLikeWeight(value: string) {
   return /(?:paper gold\s*)?\d+(?:[.,]\d+)?\s*(?:gram|gr)\b/i.test(value) || /\b(?:K\s?\d{1,2}\*?|\d{1,2}\s*Karat)\b/i.test(value);
+}
+
+function includesAny(value: string, keywords?: string[]) {
+  const haystack = value.toLowerCase();
+  return Boolean(keywords?.some((keyword) => keyword && haystack.includes(keyword.toLowerCase())));
 }
 
 function cleanPrice(raw: string, currency: "IDR" | "USD") {
@@ -180,13 +198,16 @@ function createPriceRow(
   berat: string,
   harga: string | null,
   buyback: string | null,
-  updateTime: string | null
+  updateTime: string | null,
+  sectionName?: string | null
 ): GoldPriceRow {
   return {
     id: crypto.randomUUID(),
     source_name: source.name,
     source_url: source.url,
     jenis_emas: jenisEmas,
+    section_name: sectionName ?? null,
+    category: sectionName ?? null,
     berat,
     harga,
     buyback,
@@ -199,26 +220,84 @@ function createPriceRow(
   };
 }
 
+function priceRowFromCells(
+  source: SourceConfig,
+  jenisEmas: string,
+  cells: string[],
+  updateTime: string | null,
+  sectionName?: string | null
+) {
+  const rowText = cells.join(" ");
+  if (includesAny(rowText, source.excludeKeywords)) return null;
+  if (source.includeKeywords?.length && !includesAny(rowText, source.includeKeywords)) return null;
+
+  const weightCellIndex = cells.findIndex((cell) => looksLikeWeight(cell));
+  if (weightCellIndex < 0) return null;
+
+  const berat = normalizeWeight(cells[weightCellIndex]);
+  const priceCells = cells.slice(weightCellIndex + 1).length ? cells.slice(weightCellIndex + 1) : cells;
+  const prices = priceCells
+    .map((cell) => cleanPrice(cell, source.priceCurrency))
+    .filter(Boolean) as string[];
+
+  if (!prices.length) return null;
+  return createPriceRow(source, jenisEmas, berat, prices[0] ?? null, null, updateTime, sectionName);
+}
+
 function rowsFromHtmlTables(source: SourceConfig, jenisEmas: string, html: string, updateTime: string | null) {
   const rows: GoldPriceRow[] = [];
-  const tableRows = tableRowsFromHtml(html);
+  const tableRows = tableRowsFromHtml(html, source.rowSelector || source.dataSelector);
+  const hasBoundary = Boolean(source.boundaryStartKeywords?.length);
+  let capturing = !hasBoundary;
 
   for (const cells of tableRows) {
-    const weightCellIndex = cells.findIndex((cell) => looksLikeWeight(cell));
-    if (weightCellIndex < 0) continue;
-
-    const berat = normalizeWeight(cells[weightCellIndex]);
-    const prices = cells
-      .slice(weightCellIndex + 1)
-      .map((cell) => cleanPrice(cell, source.priceCurrency))
-      .filter(Boolean) as string[];
-
-    if (!prices.length) continue;
-    const buyback = ["Emas Kita", "Laku Emas", "Indogold", "ShariaCoin", "BSI"].includes(source.name) ? prices[1] ?? null : null;
-    rows.push(createPriceRow(source, jenisEmas, berat, prices[0] ?? null, buyback, updateTime));
+    const rowText = cells.join(" ");
+    if (hasBoundary && includesAny(rowText, source.boundaryStartKeywords)) {
+      capturing = true;
+      continue;
+    }
+    if (capturing && source.boundaryStopKeywords?.length && includesAny(rowText, source.boundaryStopKeywords)) {
+      break;
+    }
+    if (!capturing) continue;
+    const row = priceRowFromCells(source, jenisEmas, cells, updateTime);
+    if (row) rows.push(row);
   }
 
   return rows;
+}
+
+const logamMuliaSections = ["Emas Batangan", "Gift Series", "Perak Murni", "Perak Heritage", "Perak", "Heritage"];
+
+function findLogamMuliaSection(rowText: string) {
+  const normalized = rowText.replace(/\s+/g, " ").trim();
+  return logamMuliaSections.find((section) => new RegExp(`\\b${section}\\b`, "i").test(normalized)) ?? null;
+}
+
+function rowsFromLogamMuliaSections(source: SourceConfig, jenisKonten: string, html: string, text: string) {
+  const updateTime = findTimestamp(text);
+  const isPerak = jenisKonten.toLowerCase().includes("perak");
+  const targetSections = isPerak ? ["Perak Murni", "Perak Heritage"] : ["Emas Batangan"];
+  const rows: GoldPriceRow[] = [];
+  let activeSection: string | null = null;
+
+  for (const cells of tableRowsFromHtml(html, source.rowSelector || source.dataSelector)) {
+    const rowText = cells.join(" ");
+    const sectionHeading = findLogamMuliaSection(rowText);
+
+    if (sectionHeading) {
+      activeSection = targetSections.includes(sectionHeading) ? sectionHeading : null;
+      continue;
+    }
+
+    if (!activeSection) continue;
+    if (!/\bRp\.?\s*\d/i.test(rowText)) continue;
+
+    const row = priceRowFromCells(source, activeSection, cells, updateTime, activeSection);
+    if (row) rows.push(row);
+  }
+
+  return dedupeRows(rows).slice(0, 80);
 }
 
 function rowsFromTextLines(source: SourceConfig, jenisEmas: string, text: string, updateTime: string | null) {
@@ -234,7 +313,7 @@ function rowsFromTextLines(source: SourceConfig, jenisEmas: string, text: string
     const next = [line, lines[index + 1] ?? "", lines[index + 2] ?? ""].join(" ");
     const prices = priceCandidates(next, source.priceCurrency);
     if (!prices.length) continue;
-    rows.push(createPriceRow(source, jenisEmas, normalizeWeight(line), prices[0] ?? null, prices[1] ?? null, updateTime));
+    rows.push(createPriceRow(source, jenisEmas, normalizeWeight(line), prices[0] ?? null, null, updateTime));
   }
 
   return rows;
@@ -254,6 +333,10 @@ function extractPriceRows(source: SourceConfig, jenisKonten: string, html: strin
   const jenisEmas = inferJenisEmas(source, jenisKonten);
   const updateTime = findTimestamp(text);
 
+  if (source.name === "Logam Mulia") {
+    return rowsFromLogamMuliaSections(source, jenisKonten, html, text);
+  }
+
   if (source.priceCurrency === "USD") {
     const prices = priceCandidates(text, "USD");
     return prices.length ? [createPriceRow(source, jenisEmas, "1 ons troi", prices[0], null, updateTime)] : [];
@@ -266,7 +349,7 @@ function extractPriceRows(source: SourceConfig, jenisKonten: string, html: strin
   if (rows.length) return rows.slice(0, 80);
 
   const fallbackPrices = priceCandidates(text, source.priceCurrency);
-  return fallbackPrices.length ? [createPriceRow(source, jenisEmas, "Satuan utama", fallbackPrices[0], fallbackPrices[1] ?? null, updateTime)] : [];
+  return fallbackPrices.length ? [createPriceRow(source, jenisEmas, "Satuan utama", fallbackPrices[0], null, updateTime)] : [];
 }
 
 function choosePrimaryRow(rows: GoldPriceRow[]) {
@@ -356,7 +439,8 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
 
     const visibleText = stripTags(fetched.html);
     const text = `${visibleText} ${fetched.html}`;
-    const elementValid = source.elementKeywords.some((keyword) => text.toLowerCase().includes(keyword.toLowerCase()));
+    const elementValid =
+      source.elementKeywords.length === 0 || source.elementKeywords.some((keyword) => text.toLowerCase().includes(keyword.toLowerCase()));
     if (!elementValid) {
       return {
         ...base,
@@ -409,15 +493,45 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
   }
 }
 
-export async function runData(portal: Portal, jenisKonten: string, selectedSource?: string | null) {
+export async function previewSourceScrape(source: SourceConfig, jenisKonten = source.group === "perak" ? "Harga Perak" : "Harga Emas") {
+  if (source.mode === "manual") {
+    return {
+      ok: false,
+      selector: source.rowSelector || source.dataSelector || "",
+      rowsFound: 0,
+      rows: [] as GoldPriceRow[],
+      message: `${source.name} berstatus manual, tidak menjalankan scraping otomatis.`
+    };
+  }
+
+  const fetched = await fetchHtml(source.url);
+  const visibleText = stripTags(fetched.html);
+  const rows = fetched.ok ? extractPriceRows(source, jenisKonten, fetched.html, visibleText) : [];
+
+  return {
+    ok: fetched.ok && rows.length > 0,
+    selector: source.rowSelector || source.dataSelector || "",
+    rowsFound: rows.length,
+    rows: rows.slice(0, 20),
+    message: fetched.ok ? `Preview menemukan ${rows.length} row harga.` : `Source merespons HTTP ${fetched.status}.`
+  };
+}
+
+export async function runData(portal: Portal, jenisKonten: string, selectedSources?: string[] | string | null) {
   const allSources = await getRuntimeSourcesForContent(portal, jenisKonten);
-  const sources = selectedSource && selectedSource !== "Semua Source" ? allSources.filter((source) => source.name === selectedSource) : allSources;
+  const selectedList = Array.isArray(selectedSources)
+    ? selectedSources.filter((source) => source && source !== "Semua Source")
+    : selectedSources && selectedSources !== "Semua Source"
+      ? [selectedSources]
+      : [];
+  const sources = selectedList.length ? allSources.filter((source) => selectedList.includes(source.name)) : allSources;
   if (!sources.length) {
     return {
       ok: false,
       portal,
       jenis_konten: jenisKonten,
-      selected_source: selectedSource ?? null,
+      selected_source: selectedList[0] ?? null,
+      selected_sources: selectedList,
       snapshots: [],
       notifications: [
         {
@@ -479,7 +593,8 @@ export async function runData(portal: Portal, jenisKonten: string, selectedSourc
     ok: successful.length > 0,
     portal,
     jenis_konten: jenisKonten,
-    selected_source: selectedSource ?? null,
+    selected_source: selectedList[0] ?? null,
+    selected_sources: selectedList.length ? selectedList : sources.map((source) => source.name),
     snapshots,
     notifications,
     partialFailure,

@@ -30,8 +30,13 @@ export interface SourceConfig {
   selectorSummary: string;
   titleSelector?: string;
   dataSelector?: string;
+  rowSelector?: string;
   timestampSelector?: string;
   elementKeywords: string[];
+  includeKeywords?: string[];
+  excludeKeywords?: string[];
+  boundaryStartKeywords?: string[];
+  boundaryStopKeywords?: string[];
   priceCurrency: "IDR" | "USD";
   operationalNote?: string;
 }
@@ -94,6 +99,8 @@ export interface GoldPriceRow {
   source_name: SourceName;
   source_url: string;
   jenis_emas: string;
+  section_name?: string | null;
+  category?: string | null;
   berat: string;
   harga: string | null;
   buyback: string | null;
@@ -131,6 +138,7 @@ export interface RunDataResponse {
   portal: Portal;
   jenis_konten: string;
   selected_source?: SourceName | null;
+  selected_sources?: SourceName[];
   snapshots: GoldPriceSnapshot[];
   notifications: DashboardNotification[];
   partialFailure: boolean;
@@ -143,11 +151,43 @@ export interface GeneratedArticle {
   body: string[];
   sourceLinks: string[];
   disclaimer?: string;
-  rekomendasiAngle: string[];
 }
 
 export interface GenerateArticleResponse {
   ok: boolean;
   article?: GeneratedArticle;
+  draft?: ArticleDraftRecord;
   notifications: DashboardNotification[];
+}
+
+export type DraftStatus = "Pending Review" | "Revision Need" | "Approved" | "Rejected";
+export type DataStatus = "Success" | "Partial Success" | "Failed";
+
+export interface DraftSourceDetail {
+  source_name: SourceName;
+  status: SourceRunStatus;
+  catatan: string;
+  row_count: number;
+}
+
+export interface ArticleDraftRecord {
+  id: string;
+  portal: Portal;
+  jenis_konten: string;
+  title: string;
+  lead: string;
+  body: string[];
+  source_links: string[];
+  date: string;
+  generated_at: string;
+  triggered_by: string;
+  assigned_editor: string;
+  data_status: DataStatus;
+  status_draft: DraftStatus;
+  source_details: DraftSourceDetail[];
+  review_note: string | null;
+  review_note_updated_at: string | null;
+  review_note_updated_by: string | null;
+  created_at?: string;
+  updated_at?: string;
 }

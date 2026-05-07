@@ -103,8 +103,13 @@ function selectorConfigFromSource(source: SourceConfig) {
     selectorSummary: source.selectorSummary,
     titleSelector: source.titleSelector ?? "",
     dataSelector: source.dataSelector ?? "",
+    rowSelector: source.rowSelector ?? "",
     timestampSelector: source.timestampSelector ?? "",
-    elementKeywords: source.elementKeywords
+    elementKeywords: source.elementKeywords,
+    includeKeywords: source.includeKeywords ?? [],
+    excludeKeywords: source.excludeKeywords ?? [],
+    boundaryStartKeywords: source.boundaryStartKeywords ?? [],
+    boundaryStopKeywords: source.boundaryStopKeywords ?? []
   };
 }
 
@@ -122,8 +127,13 @@ function sourceRecordFromRow(row: Record<string, unknown>): AdminSourceRecord {
     selectorSummary: String(selectorConfig.selectorSummary ?? ""),
     titleSelector: selectorConfig.titleSelector ? String(selectorConfig.titleSelector) : undefined,
     dataSelector: selectorConfig.dataSelector ? String(selectorConfig.dataSelector) : undefined,
+    rowSelector: selectorConfig.rowSelector ? String(selectorConfig.rowSelector) : undefined,
     timestampSelector: selectorConfig.timestampSelector ? String(selectorConfig.timestampSelector) : undefined,
     elementKeywords: Array.isArray(selectorConfig.elementKeywords) ? selectorConfig.elementKeywords.map(String) : [],
+    includeKeywords: Array.isArray(selectorConfig.includeKeywords) ? selectorConfig.includeKeywords.map(String) : [],
+    excludeKeywords: Array.isArray(selectorConfig.excludeKeywords) ? selectorConfig.excludeKeywords.map(String) : [],
+    boundaryStartKeywords: Array.isArray(selectorConfig.boundaryStartKeywords) ? selectorConfig.boundaryStartKeywords.map(String) : [],
+    boundaryStopKeywords: Array.isArray(selectorConfig.boundaryStopKeywords) ? selectorConfig.boundaryStopKeywords.map(String) : [],
     priceCurrency: row.price_currency === "USD" ? "USD" : "IDR",
     operationalNote: row.operational_note ? String(row.operational_note) : undefined,
     is_active: Boolean(row.is_active),
@@ -284,8 +294,13 @@ export function adminSourceToConfig(source: AdminSourceRecord): SourceConfig {
     selectorSummary: source.selectorSummary,
     titleSelector: source.titleSelector,
     dataSelector: source.dataSelector,
+    rowSelector: source.rowSelector,
     timestampSelector: source.timestampSelector,
     elementKeywords: source.elementKeywords,
+    includeKeywords: source.includeKeywords,
+    excludeKeywords: source.excludeKeywords,
+    boundaryStartKeywords: source.boundaryStartKeywords,
+    boundaryStopKeywords: source.boundaryStopKeywords,
     priceCurrency: source.priceCurrency,
     operationalNote: source.operationalNote
   };

@@ -36,6 +36,8 @@ export async function GET(request: Request) {
       group: source.group,
       url: source.url,
       selectorSummary: source.selectorSummary,
+      rowSelector: source.rowSelector ?? null,
+      dataSelector: source.dataSelector ?? null,
       operationalNote: source.operationalNote ?? null
     }))
   });

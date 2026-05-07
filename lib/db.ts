@@ -4,6 +4,7 @@ const managedTables = [
   "gold_price_snapshots",
   "source_mapping_master",
   "article_templates",
+  "article_drafts",
   "history_uploads",
   "source_monitor_logs"
 ];

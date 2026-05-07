@@ -14,7 +14,6 @@ export const portalContentTypes: Record<Portal, string[]> = {
 
 export const menuItems = [
   "Overview",
-  "Run Data",
   "Generate Artikel",
   "Data Harga Emas",
   "Histori",
@@ -31,8 +30,12 @@ export const sourceConfigs: SourceConfig[] = [
     selectorSummary: "h2.ngc-title, tabel harga emas/perak, perubahan terakhir",
     titleSelector: "h2.ngc-title",
     dataSelector: "table.table-bordered",
+    rowSelector: "table.table-bordered tr",
     timestampSelector: "Perubahan terakhir",
     elementKeywords: ["Harga Emas Hari Ini", "Emas Batangan", "ngc-title"],
+    boundaryStartKeywords: ["Emas Batangan"],
+    boundaryStopKeywords: ["Gift Series", "Perak Murni", "Perak Heritage", "Perak", "Heritage"],
+    excludeKeywords: ["Gift Series"],
     priceCurrency: "IDR"
   },
   {

@@ -45,6 +45,30 @@ model ArticleTemplate {
   @@map("article_templates")
 }
 
+model ArticleDraft {
+  id                     String   @id
+  portal                 String
+  jenis_konten           String
+  title                  String
+  lead                   String
+  body                   Json
+  source_links           Json
+  date                   DateTime
+  generated_at           DateTime
+  triggered_by           String
+  assigned_editor        String
+  data_status            String
+  status_draft           String   @default("Pending Review")
+  source_details         Json
+  review_note            String?
+  review_note_updated_at DateTime?
+  review_note_updated_by String?
+  created_at             DateTime @default(now())
+  updated_at             DateTime @updatedAt
+
+  @@map("article_drafts")
+}
+
 model SourceMappingMaster {
   id               String   @id @default(cuid())
   source_name      String   @unique

@@ -85,9 +85,9 @@ function rowsBySource(snapshots: GoldPriceSnapshot[]) {
 
 function formatRow(row: GoldPriceRow, includeSource = false) {
   const sourcePrefix = includeSource ? `${row.source_name} - ` : "";
-  const buyback = row.buyback ? `, buyback ${row.buyback}` : "";
   const delta = row.delta ? ` (${row.delta}${row.percentage_change ? ` / ${row.percentage_change}` : ""})` : "";
-  return `- ${sourcePrefix}${row.berat}: ${row.harga ?? "-"}${buyback}${delta}`;
+  const category = row.category ? `${row.category} - ` : "";
+  return `- ${sourcePrefix}${category}${row.berat}: ${row.harga ?? "-"}${delta}`;
 }
 
 function priceBlockTitle(jenisKonten: string, sourceName: string) {
@@ -175,7 +175,7 @@ function beritasatuBody(jenisKonten: string, snapshots: GoldPriceSnapshot[], par
   const body: string[] = [];
   body.push(
     openingOverride ||
-      `${portalDateline("Beritasatu")} - ${jenisKonten} pada ${todayLabel()} ${strongestMovement(snapshots)} berdasarkan pembaruan data terbaru dari ${sourceNames(snapshots)}. Harga utama yang terpantau dari ${first.source_name} berada di ${first.harga_terbaru ?? "-"}${first.buyback ? `, dengan buyback ${first.buyback}` : ""}.`
+      `${portalDateline("Beritasatu")} - ${jenisKonten} pada ${todayLabel()} ${strongestMovement(snapshots)} berdasarkan pembaruan data terbaru dari ${sourceNames(snapshots)}. Harga utama yang terpantau dari ${first.source_name} berada di ${first.harga_terbaru ?? "-"}.`
   );
   body.push(comparisonSentence(snapshots));
   body.push(...priceBlocks(snapshots));
@@ -204,9 +204,7 @@ function investorDailyBody(jenisKonten: string, snapshots: GoldPriceSnapshot[], 
   );
   body.push(marketContext(jenisKonten, "Investor Daily"));
   body.push(...priceBlocks(snapshots));
-  body.push(
-    "Bagi investor ritel, daftar harga per berat membantu menghitung kebutuhan modal secara lebih presisi. Sementara itu, harga buyback memberi gambaran nilai jual kembali jika investor ingin mencairkan kepemilikan emas."
-  );
+  body.push("Bagi investor ritel, daftar harga per berat membantu menghitung kebutuhan modal secara lebih presisi sebelum mengambil keputusan transaksi.");
 
   if (partialFailure) body.push("Sebagian source tidak berhasil dimuat. Artikel dibuat berdasarkan data yang tersedia.");
   body.push(
@@ -255,14 +253,7 @@ export async function generateArticle(
           : `${portalDateline(portal)} - ${jenisKonten} menjadi perhatian pasar setelah data ${sourceNames(usable)} menunjukkan pergerakan terbaru harga emas.`,
       body,
       sourceLinks: [...new Set(usable.map((snapshot) => snapshot.source_url))],
-      disclaimer: partialFailure ? "Sebagian source tidak berhasil dimuat. Artikel dibuat berdasarkan data yang tersedia." : undefined,
-      rekomendasiAngle: [
-        "Cek apakah harga hari ini menjadi level tertinggi atau terendah dalam 7 hari terakhir.",
-        "Tambahkan sentimen emas dunia jika pergerakan harga domestik mengikuti pasar global.",
-        "Bandingkan harga Pegadaian vs Antam untuk angle pilihan pembeli ritel.",
-        "Tambahkan konteks geopolitik atau arah dolar AS untuk artikel harga emas dunia.",
-        "Untuk emas digital, bandingkan spread harga beli dan buyback antarplatform."
-      ]
+      disclaimer: partialFailure ? "Sebagian source tidak berhasil dimuat. Artikel dibuat berdasarkan data yang tersedia." : undefined
     },
     notifications: [
       {
