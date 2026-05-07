@@ -1,15 +1,7 @@
+import { hasDatabaseUrl, withDatabaseClient } from "./db";
 import type { GoldPriceSnapshot } from "./types";
 
 let memorySnapshots: GoldPriceSnapshot[] = [];
-
-function dbSslConfig() {
-  const databaseUrl = process.env.DATABASE_URL ?? "";
-  if (process.env.DATABASE_SSL === "false") return undefined;
-  if (process.env.DATABASE_SSL === "true" || databaseUrl.includes("sslmode=require")) {
-    return { rejectUnauthorized: false };
-  }
-  return undefined;
-}
 
 async function ensureTables(client: import("pg").Client) {
   await client.query(`
@@ -41,11 +33,8 @@ async function ensureTables(client: import("pg").Client) {
 export async function saveSnapshots(snapshots: GoldPriceSnapshot[]) {
   if (!snapshots.length) return;
 
-  if (process.env.DATABASE_URL) {
-    const { Client } = await import("pg");
-    const client = new Client({ connectionString: process.env.DATABASE_URL, ssl: dbSslConfig() });
-    await client.connect();
-    try {
+  if (hasDatabaseUrl()) {
+    await withDatabaseClient(async (client) => {
       await ensureTables(client);
       for (const snapshot of snapshots) {
         await client.query(
@@ -77,9 +66,7 @@ export async function saveSnapshots(snapshots: GoldPriceSnapshot[]) {
           ]
         );
       }
-    } finally {
-      await client.end();
-    }
+    });
     return;
   }
 
@@ -87,11 +74,8 @@ export async function saveSnapshots(snapshots: GoldPriceSnapshot[]) {
 }
 
 export async function getHistoricalSnapshots() {
-  if (process.env.DATABASE_URL) {
-    const { Client } = await import("pg");
-    const client = new Client({ connectionString: process.env.DATABASE_URL, ssl: dbSslConfig() });
-    await client.connect();
-    try {
+  if (hasDatabaseUrl()) {
+    return withDatabaseClient(async (client) => {
       await ensureTables(client);
       const result = await client.query<Record<string, unknown>>(
         "SELECT * FROM gold_price_snapshots ORDER BY run_time DESC LIMIT 500"
@@ -102,9 +86,7 @@ export async function getHistoricalSnapshots() {
         tanggal_snapshot: row.tanggal_snapshot instanceof Date ? row.tanggal_snapshot.toISOString().slice(0, 10) : row.tanggal_snapshot,
         price_rows: Array.isArray(row.price_rows) ? row.price_rows : []
       })) as GoldPriceSnapshot[];
-    } finally {
-      await client.end();
-    }
+    });
   }
 
   return [...memorySnapshots].sort((a, b) => b.run_time.localeCompare(a.run_time));

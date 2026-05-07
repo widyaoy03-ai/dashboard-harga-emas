@@ -62,6 +62,7 @@ Environment variable yang disarankan:
 
 ```bash
 DATABASE_URL=postgresql://user:password@host:5432/database
+DIRECT_URL=postgresql://user:password@host:5432/database
 DATABASE_SSL=true
 ADMIN_TOKEN=token-admin-yang-kuat
 ```
@@ -69,8 +70,10 @@ ADMIN_TOKEN=token-admin-yang-kuat
 Catatan:
 
 - `DATABASE_URL` wajib untuk public deployment agar histori, source, template, dan monitoring tidak hilang.
+- `DIRECT_URL` opsional untuk migration/admin database. Runtime aplikasi membaca `DATABASE_URL`.
 - `ADMIN_TOKEN` melindungi endpoint admin di URL publik. Isi token yang sama di field `ADMIN_TOKEN` pada tab `Pengaturan`.
 - Tabel PostgreSQL dibuat otomatis saat API pertama kali dipakai. `prisma/schema.prisma` disediakan sebagai dokumentasi schema produksi.
+- Cek koneksi database production melalui endpoint protected: `/api/admin/db-health` dengan header `x-admin-token: <ADMIN_TOKEN>`.
 
 ## Admin CMS
 

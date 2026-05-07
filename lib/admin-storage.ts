@@ -1,4 +1,5 @@
 import { contentSourceMap, portalContentTypes, sourceConfigs } from "./content-framework";
+import { hasDatabaseUrl, withDatabaseClient } from "./db";
 import { templateProfiles } from "./editorial-templates";
 import type {
   AdminSourceRecord,
@@ -35,29 +36,12 @@ function createId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
-function dbSslConfig() {
-  const databaseUrl = process.env.DATABASE_URL ?? "";
-  if (process.env.DATABASE_SSL === "false") return undefined;
-  if (process.env.DATABASE_SSL === "true" || databaseUrl.includes("sslmode=require")) {
-    return { rejectUnauthorized: false };
-  }
-  return undefined;
-}
-
 async function withClient<T>(callback: (client: PgClient) => Promise<T>) {
-  const { Client } = await import("pg");
-  const client = new Client({
-    connectionString: process.env.DATABASE_URL,
-    ssl: dbSslConfig()
-  });
-  await client.connect();
-  try {
+  return withDatabaseClient(async (client) => {
     await ensureAdminTables(client);
     await seedAdminDefaults(client);
     return await callback(client);
-  } finally {
-    await client.end();
-  }
+  });
 }
 
 function sourceContentMapping(sourceName: string): SourceContentMapping[] {
@@ -308,7 +292,7 @@ export function adminSourceToConfig(source: AdminSourceRecord): SourceConfig {
 }
 
 export async function getAdminSources() {
-  if (process.env.DATABASE_URL) {
+  if (hasDatabaseUrl()) {
     return withClient(async (client) => {
       const result = await client.query("SELECT * FROM source_mapping_master ORDER BY source_name ASC");
       return result.rows.map(sourceRecordFromRow);
@@ -330,7 +314,7 @@ export async function upsertAdminSource(input: AdminSourceInput) {
     updated_at: nowIso()
   };
 
-  if (process.env.DATABASE_URL) {
+  if (hasDatabaseUrl()) {
     return withClient(async (client) => {
       await client.query(
         `INSERT INTO source_mapping_master (
@@ -382,7 +366,7 @@ export async function getRuntimeSourcesForContent(portal: Portal, jenisKonten: s
 }
 
 export async function getAdminTemplates() {
-  if (process.env.DATABASE_URL) {
+  if (hasDatabaseUrl()) {
     return withClient(async (client) => {
       const result = await client.query("SELECT * FROM article_templates ORDER BY portal ASC, jenis_konten ASC, updated_at DESC");
       return result.rows.map(templateRecordFromRow);
@@ -403,7 +387,7 @@ export async function upsertArticleTemplate(input: ArticleTemplateInput) {
     updated_at: nowIso()
   };
 
-  if (process.env.DATABASE_URL) {
+  if (hasDatabaseUrl()) {
     return withClient(async (client) => {
       await client.query(
         `INSERT INTO article_templates (
@@ -462,7 +446,7 @@ export async function saveHistoryUpload(fileName: string, fileType: string, uplo
     created_at: nowIso()
   };
 
-  if (process.env.DATABASE_URL) {
+  if (hasDatabaseUrl()) {
     return withClient(async (client) => {
       if (uploadMode === "replace") await client.query("DELETE FROM history_uploads");
       await client.query(
@@ -480,7 +464,7 @@ export async function saveHistoryUpload(fileName: string, fileType: string, uplo
 }
 
 export async function getHistoryUploads() {
-  if (process.env.DATABASE_URL) {
+  if (hasDatabaseUrl()) {
     return withClient(async (client) => {
       const result = await client.query("SELECT * FROM history_uploads ORDER BY created_at DESC LIMIT 100");
       return result.rows.map(historyRecordFromRow);
@@ -497,7 +481,7 @@ export async function saveMonitorLogs(logs: Omit<SourceMonitorLog, "id" | "check
     ...log
   }));
 
-  if (process.env.DATABASE_URL) {
+  if (hasDatabaseUrl()) {
     return withClient(async (client) => {
       for (const record of records) {
         await client.query(
@@ -516,7 +500,7 @@ export async function saveMonitorLogs(logs: Omit<SourceMonitorLog, "id" | "check
 }
 
 export async function getMonitorLogs() {
-  if (process.env.DATABASE_URL) {
+  if (hasDatabaseUrl()) {
     return withClient(async (client) => {
       const result = await client.query("SELECT * FROM source_monitor_logs ORDER BY checked_at DESC LIMIT 100");
       return result.rows.map(monitorLogFromRow);
