@@ -10,9 +10,19 @@ const sourceSchema = z.object({
   mode: z.enum(["otomatis", "manual"]),
   group: z.enum(["antam", "perak", "dunia", "perhiasan", "pegadaian", "digital", "emas-kecil", "manual"]),
   selectorSummary: z.string().optional().default(""),
+  parserType: z.enum(["generic-table", "logam-mulia"]).optional(),
   titleSelector: z.string().optional(),
   dataSelector: z.string().optional(),
   rowSelector: z.string().optional(),
+  fieldMapping: z
+    .object({
+      weightIndex: z.number().int().nonnegative().optional(),
+      priceIndex: z.number().int().nonnegative().optional(),
+      basePriceIndex: z.number().int().nonnegative().optional(),
+      pricePph025Index: z.number().int().nonnegative().optional(),
+      productTypeIndex: z.number().int().nonnegative().optional()
+    })
+    .optional(),
   timestampSelector: z.string().optional(),
   elementKeywords: z.array(z.string()).default([]),
   includeKeywords: z.array(z.string()).default([]),
@@ -70,6 +80,8 @@ export async function POST(request: Request) {
     titleSelector: parsed.data.titleSelector || undefined,
     dataSelector: parsed.data.dataSelector || undefined,
     rowSelector: parsed.data.rowSelector || undefined,
+    parserType: parsed.data.parserType ?? "generic-table",
+    fieldMapping: parsed.data.fieldMapping,
     timestampSelector: parsed.data.timestampSelector || undefined,
     operationalNote: parsed.data.operationalNote || undefined,
     elementKeywords: parsed.data.elementKeywords.map((keyword) => keyword.trim()).filter(Boolean),

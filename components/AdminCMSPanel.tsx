@@ -9,6 +9,7 @@ import type {
   AdminSourceRecord,
   ArticleTemplateRecord,
   DashboardNotification,
+  GoldPriceRow,
   HistoryUploadRecord,
   Portal,
   SourceContentMapping,
@@ -41,6 +42,19 @@ type AdminMonitoringResponse = {
   message?: string;
 };
 
+type SourcePreviewResponse = {
+  ok: boolean;
+  preview: {
+    ok: boolean;
+    selector: string;
+    previewedAt: string;
+    rowsFound: number;
+    validRows: number;
+    rows: GoldPriceRow[];
+    message: string;
+  };
+};
+
 const adminTabs: AdminTab[] = ["Pengaturan Source", "Template Artikel", "Upload Histori", "Monitoring Source"];
 
 const emptySource: AdminSourceRecord = {
@@ -50,10 +64,17 @@ const emptySource: AdminSourceRecord = {
   mode: "otomatis",
   group: "manual",
   selectorSummary: "",
+  parserType: "generic-table",
   titleSelector: "",
   dataSelector: "",
+  rowSelector: "",
+  fieldMapping: { weightIndex: 0, priceIndex: 1 },
   timestampSelector: "",
   elementKeywords: [],
+  includeKeywords: [],
+  excludeKeywords: [],
+  boundaryStartKeywords: [],
+  boundaryStopKeywords: [],
   priceCurrency: "IDR",
   operationalNote: "",
   is_active: true,
@@ -90,6 +111,25 @@ function statusClass(status: string) {
   return "border-border bg-background text-textSecondary";
 }
 
+function sourcePreviewSignature(source: AdminSourceRecord) {
+  return JSON.stringify({
+    name: source.name,
+    url: source.url,
+    mode: source.mode,
+    group: source.group,
+    parserType: source.parserType,
+    dataSelector: source.dataSelector,
+    rowSelector: source.rowSelector,
+    fieldMapping: source.fieldMapping,
+    elementKeywords: source.elementKeywords,
+    includeKeywords: source.includeKeywords,
+    excludeKeywords: source.excludeKeywords,
+    boundaryStartKeywords: source.boundaryStartKeywords,
+    boundaryStopKeywords: source.boundaryStopKeywords,
+    priceCurrency: source.priceCurrency
+  });
+}
+
 function adminHeaders(token: string, json = true): HeadersInit {
   const headers: Record<string, string> = {};
   if (json) headers["content-type"] = "application/json";
@@ -114,6 +154,8 @@ export function AdminCMSPanel() {
   const [templateForm, setTemplateForm] = useState<ArticleTemplateRecord>(emptyTemplate);
   const [historyMode, setHistoryMode] = useState<"append" | "replace">("append");
   const [historyFile, setHistoryFile] = useState<File | null>(null);
+  const [sourcePreview, setSourcePreview] = useState<SourcePreviewResponse["preview"] | null>(null);
+  const [sourcePreviewKey, setSourcePreviewKey] = useState("");
 
   const mappings = useMemo(
     () =>
@@ -154,6 +196,9 @@ export function AdminCMSPanel() {
 
   const saveSourceMutation = useMutation({
     mutationFn: async () => {
+      if (sourceForm.mode === "otomatis" && (!sourcePreview?.ok || sourcePreview.validRows === 0 || sourcePreviewKey !== sourcePreviewSignature(sourceForm))) {
+        throw new Error("Klik Preview Scrape terlebih dahulu dan pastikan data valid sebelum menyimpan source.");
+      }
       const body = {
         ...sourceForm,
         id: sourceForm.id || undefined,
@@ -162,9 +207,16 @@ export function AdminCMSPanel() {
         selectorSummary: sourceForm.selectorSummary.trim(),
         titleSelector: sourceForm.titleSelector?.trim() || undefined,
         dataSelector: sourceForm.dataSelector?.trim() || undefined,
+        rowSelector: sourceForm.rowSelector?.trim() || undefined,
+        parserType: sourceForm.parserType ?? "generic-table",
+        fieldMapping: sourceForm.fieldMapping,
         timestampSelector: sourceForm.timestampSelector?.trim() || undefined,
         operationalNote: sourceForm.operationalNote?.trim() || undefined,
-        elementKeywords: sourceForm.elementKeywords
+        elementKeywords: sourceForm.elementKeywords,
+        includeKeywords: sourceForm.includeKeywords ?? [],
+        excludeKeywords: sourceForm.excludeKeywords ?? [],
+        boundaryStartKeywords: sourceForm.boundaryStartKeywords ?? [],
+        boundaryStopKeywords: sourceForm.boundaryStopKeywords ?? []
       };
       return readResponse<{ ok: boolean; source: AdminSourceRecord; notification?: DashboardNotification }>(
         await fetch("/api/admin/sources", {
@@ -192,6 +244,45 @@ export function AdminCMSPanel() {
           kind: "error",
           title: "Source gagal disimpan",
           message: payload.message ?? "Periksa ADMIN_TOKEN atau format data source."
+        }
+      ]);
+    }
+  });
+
+  const previewSourceMutation = useMutation({
+    mutationFn: async () =>
+      readResponse<SourcePreviewResponse>(
+        await fetch("/api/admin/source-preview", {
+          method: "POST",
+          headers: adminHeaders(adminToken),
+          body: JSON.stringify({
+            ...sourceForm,
+            parserType: sourceForm.parserType ?? "generic-table",
+            fieldMapping: sourceForm.fieldMapping,
+            jenisKonten: sourceForm.content_mapping[0]?.jenis_konten
+          })
+        })
+      ),
+    onSuccess: (data) => {
+      setSourcePreview(data.preview);
+      setSourcePreviewKey(sourcePreviewSignature(sourceForm));
+      pushNotifications([
+        {
+          id: crypto.randomUUID(),
+          kind: data.preview.ok ? "success" : "warning",
+          title: "Preview scrape selesai",
+          message: data.preview.message
+        }
+      ]);
+    },
+    onError: (error) => {
+      const payload = error as { message?: string };
+      pushNotifications([
+        {
+          id: crypto.randomUUID(),
+          kind: "error",
+          title: "Preview scrape gagal",
+          message: payload.message ?? "Periksa ADMIN_TOKEN, URL, atau selector source."
         }
       ]);
     }
@@ -353,11 +444,15 @@ export function AdminCMSPanel() {
       {activeAdminTab === "Pengaturan Source" && (
         <div className="mt-5 grid gap-5 xl:grid-cols-[420px_1fr]">
           <div className="rounded-lg border border-border bg-background p-4">
-            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center justify-between gap-3">
               <h3 className="text-base font-bold text-primary">Form Source</h3>
               <button
                 type="button"
-                onClick={() => setSourceForm(emptySource)}
+                onClick={() => {
+                  setSourceForm(emptySource);
+                  setSourcePreview(null);
+                  setSourcePreviewKey("");
+                }}
                 className="inline-flex h-9 items-center gap-2 rounded-lg border border-border px-3 text-sm font-semibold text-textSecondary"
               >
                 <Plus className="h-4 w-4" />
@@ -404,6 +499,14 @@ export function AdminCMSPanel() {
                   <option key={group}>{group}</option>
                 ))}
               </select>
+              <select
+                value={sourceForm.parserType ?? "generic-table"}
+                onChange={(event) => setSourceForm({ ...sourceForm, parserType: event.target.value as AdminSourceRecord["parserType"] })}
+                className="h-11 rounded-lg border border-border bg-surface px-3 text-sm"
+              >
+                <option value="generic-table">generic-table</option>
+                <option value="logam-mulia">logam-mulia</option>
+              </select>
               <input
                 value={sourceForm.selectorSummary}
                 onChange={(event) => setSourceForm({ ...sourceForm, selectorSummary: event.target.value })}
@@ -423,6 +526,43 @@ export function AdminCMSPanel() {
                 placeholder="Element data / selector tabel"
               />
               <input
+                value={sourceForm.rowSelector ?? ""}
+                onChange={(event) => setSourceForm({ ...sourceForm, rowSelector: event.target.value })}
+                className="h-11 rounded-lg border border-border bg-surface px-3 text-sm"
+                placeholder="Row selector, contoh: table.table-bordered tr"
+              />
+              <div className="rounded-lg border border-border bg-surface p-3">
+                <p className="text-sm font-bold text-textPrimary">Field Mapping Kolom</p>
+                <div className="mt-3 grid gap-2 sm:grid-cols-4">
+                  {[
+                    ["weightIndex", "Berat"],
+                    ["priceIndex", "Harga Utama"],
+                    ["basePriceIndex", "Harga Dasar"],
+                    ["pricePph025Index", "Harga + PPh"]
+                  ].map(([key, label]) => (
+                    <label key={key} className="grid gap-1 text-xs font-semibold text-textSecondary">
+                      {label}
+                      <input
+                        type="number"
+                        min={0}
+                        value={sourceForm.fieldMapping?.[key as keyof NonNullable<AdminSourceRecord["fieldMapping"]>] ?? ""}
+                        onChange={(event) => {
+                          const value = event.target.value === "" ? undefined : Number(event.target.value);
+                          setSourceForm({
+                            ...sourceForm,
+                            fieldMapping: {
+                              ...(sourceForm.fieldMapping ?? {}),
+                              [key]: value
+                            }
+                          });
+                        }}
+                        className="h-10 rounded-lg border border-border bg-background px-2 text-sm"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <input
                 value={sourceForm.timestampSelector ?? ""}
                 onChange={(event) => setSourceForm({ ...sourceForm, timestampSelector: event.target.value })}
                 className="h-11 rounded-lg border border-border bg-surface px-3 text-sm"
@@ -433,6 +573,30 @@ export function AdminCMSPanel() {
                 onChange={(event) => setSourceForm({ ...sourceForm, elementKeywords: splitInput(event.target.value) })}
                 className="min-h-24 rounded-lg border border-border bg-surface px-3 py-2 text-sm"
                 placeholder="Keyword validasi element, satu per baris"
+              />
+              <textarea
+                value={(sourceForm.includeKeywords ?? []).join("\n")}
+                onChange={(event) => setSourceForm({ ...sourceForm, includeKeywords: splitInput(event.target.value) })}
+                className="min-h-20 rounded-lg border border-border bg-surface px-3 py-2 text-sm"
+                placeholder="Include keyword row, satu per baris"
+              />
+              <textarea
+                value={(sourceForm.excludeKeywords ?? []).join("\n")}
+                onChange={(event) => setSourceForm({ ...sourceForm, excludeKeywords: splitInput(event.target.value) })}
+                className="min-h-20 rounded-lg border border-border bg-surface px-3 py-2 text-sm"
+                placeholder="Exclude keyword row, satu per baris"
+              />
+              <textarea
+                value={(sourceForm.boundaryStartKeywords ?? []).join("\n")}
+                onChange={(event) => setSourceForm({ ...sourceForm, boundaryStartKeywords: splitInput(event.target.value) })}
+                className="min-h-20 rounded-lg border border-border bg-surface px-3 py-2 text-sm"
+                placeholder="Boundary start, contoh: Emas Batangan"
+              />
+              <textarea
+                value={(sourceForm.boundaryStopKeywords ?? []).join("\n")}
+                onChange={(event) => setSourceForm({ ...sourceForm, boundaryStopKeywords: splitInput(event.target.value) })}
+                className="min-h-20 rounded-lg border border-border bg-surface px-3 py-2 text-sm"
+                placeholder="Boundary stop, contoh: Gift Series, Perak"
               />
               <textarea
                 value={sourceForm.operationalNote ?? ""}
@@ -463,6 +627,56 @@ export function AdminCMSPanel() {
                   ))}
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={() => previewSourceMutation.mutate()}
+                disabled={previewSourceMutation.isPending || !sourceForm.url || !sourceForm.name}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-primary bg-surface px-4 text-sm font-semibold text-primary disabled:opacity-70"
+              >
+                <Activity className="h-4 w-4" />
+                Preview Hasil Scrape
+              </button>
+              {sourcePreview && (
+                <div className="rounded-lg border border-border bg-surface p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-bold text-textPrimary">Preview Hasil Scrape</p>
+                    <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(sourcePreview.ok ? "success" : "warning")}`}>
+                      {sourcePreview.validRows} data valid
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-textSecondary">Selector: {sourcePreview.selector || "-"}</p>
+                  <p className="mt-1 text-xs text-textSecondary">Row ditemukan: {sourcePreview.rowsFound} | Preview: {new Date(sourcePreview.previewedAt).toLocaleString("id-ID")}</p>
+                  <div className="mt-3 max-h-56 overflow-auto rounded-lg border border-border">
+                    <table className="w-full min-w-[720px] border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-border bg-background text-left text-textSecondary">
+                          <th className="px-2 py-2">Kategori</th>
+                          <th className="px-2 py-2">Berat</th>
+                          <th className="px-2 py-2 text-right">Harga Dasar</th>
+                          <th className="px-2 py-2 text-right">Harga + Pajak PPh 0.25%</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sourcePreview.rows.map((row) => (
+                          <tr key={row.id} className="border-b border-border/60">
+                            <td className="px-2 py-2">{row.category ?? "-"}</td>
+                            <td className="px-2 py-2">{row.berat}</td>
+                            <td className="px-2 py-2 text-right font-semibold">{row.base_price?.toLocaleString("id-ID") ?? row.harga ?? "-"}</td>
+                            <td className="px-2 py-2 text-right font-semibold">{row.price_pph_025?.toLocaleString("id-ID") ?? "-"}</td>
+                          </tr>
+                        ))}
+                        {!sourcePreview.rows.length && (
+                          <tr>
+                            <td colSpan={4} className="px-2 py-5 text-center text-textSecondary">
+                              Tidak ada row valid. Periksa row selector atau boundary keyword.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => saveSourceMutation.mutate()}
@@ -501,11 +715,18 @@ export function AdminCMSPanel() {
                       </span>
                     </td>
                     <td className="px-3 py-3 text-textSecondary">{source.content_mapping.length} jenis konten</td>
-                    <td className="px-3 py-3 text-textSecondary">{source.selectorSummary}</td>
+                    <td className="px-3 py-3 text-textSecondary">
+                      <p>{source.selectorSummary}</p>
+                      <p className="mt-1 text-xs">Row: {source.rowSelector ?? source.dataSelector ?? "-"}</p>
+                    </td>
                     <td className="px-3 py-3">
                       <button
                         type="button"
-                        onClick={() => setSourceForm(source)}
+                        onClick={() => {
+                          setSourceForm(source);
+                          setSourcePreview(null);
+                          setSourcePreviewKey("");
+                        }}
                         className="h-9 rounded-lg border border-border px-3 text-sm font-semibold text-primary"
                       >
                         Edit
@@ -561,11 +782,11 @@ export function AdminCMSPanel() {
                   <option key={contentType}>{contentType}</option>
                 ))}
               </select>
-              <input
+              <textarea
                 value={templateForm.headline_template}
                 onChange={(event) => setTemplateForm({ ...templateForm, headline_template: event.target.value })}
-                className="h-11 rounded-lg border border-border bg-surface px-3 text-sm"
-                placeholder="Headline template"
+                className="min-h-24 rounded-lg border border-border bg-surface px-3 py-2 text-sm"
+                placeholder="Headline template. Bisa multi-line untuk beberapa opsi judul."
               />
               <textarea
                 value={templateForm.body_template}

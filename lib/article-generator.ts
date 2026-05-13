@@ -151,7 +151,11 @@ function headlineFor(portal: Portal, jenisKonten: string, snapshots: GoldPriceSn
   const lower = jenisKonten.toLowerCase();
 
   if (template?.headline_template) {
-    const rendered = renderTemplateText(template.headline_template, portal, jenisKonten, snapshots);
+    const headlinePattern = template.headline_template
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean);
+    const rendered = renderTemplateText(headlinePattern ?? template.headline_template, portal, jenisKonten, snapshots);
     if (rendered.trim()) return rendered.trim();
   }
 

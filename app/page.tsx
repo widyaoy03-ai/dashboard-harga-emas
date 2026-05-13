@@ -110,6 +110,17 @@ function formatMoney(value?: string | null) {
   return `Rp ${Number(digits).toLocaleString("id-ID")}`;
 }
 
+function formatNumericRupiah(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  return `Rp ${value.toLocaleString("id-ID")}`;
+}
+
+function formatNumericPrice(row: GoldPriceRow, value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  if (row.harga?.startsWith("US$")) return `US$ ${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return formatNumericRupiah(value);
+}
+
 function formatDate(value?: string | null) {
   if (!value) return "-";
   const date = new Date(value);
@@ -172,6 +183,12 @@ function flattenPriceRows(snapshots: GoldPriceSnapshot[]): PriceRowWithSnapshot[
               source_name: snapshot.source_name,
               source_url: snapshot.source_url,
               jenis_emas: snapshot.jenis_emas,
+              product_type: snapshot.jenis_emas,
+              weight: snapshot.berat ?? "-",
+              base_price: null,
+              price_pph_025: null,
+              source: snapshot.source_name,
+              scraped_at: snapshot.update_time,
               section_name: null,
               category: null,
               berat: snapshot.berat ?? "-",
@@ -234,6 +251,30 @@ function FieldLabel({ children, tooltip, detailId }: { children: React.ReactNode
       <HelpTooltip text={tooltip} detailId={detailId} />
     </span>
   );
+}
+
+async function copyTextWithFallback(text: string) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fallback below
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  try {
+    return document.execCommand("copy");
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 function Toasts() {
@@ -460,7 +501,8 @@ function PriceDataTable({ rows, emptyMessage, showContent = false }: { rows: Pri
             {showContent && <th className="px-3 py-3 font-semibold">Jenis Konten</th>}
             <th className="px-3 py-3 font-semibold">Kategori</th>
             <th className="px-3 py-3 font-semibold">Berat</th>
-            <th className="px-3 py-3 text-right font-semibold">Harga</th>
+            <th className="px-3 py-3 text-right font-semibold">Harga Dasar</th>
+            <th className="px-3 py-3 text-right font-semibold">Harga + Pajak PPh 0.25%</th>
             <th className="px-3 py-3 font-semibold">Update Terakhir</th>
             <th className="px-3 py-3 text-right font-semibold">
               <span className="inline-flex items-center justify-end gap-1">
@@ -495,7 +537,8 @@ function PriceDataTable({ rows, emptyMessage, showContent = false }: { rows: Pri
                   {showContent && <td className="px-3 py-3 text-textSecondary">{snapshot.jenis_konten}</td>}
                   <td className="px-3 py-3 text-textSecondary">{row.category ?? row.section_name ?? "-"}</td>
                   <td className="px-3 py-3 text-textSecondary">{row.berat}</td>
-                  <td className="px-3 py-3 text-right font-semibold text-textPrimary">{formatMoney(row.harga)}</td>
+                  <td className="px-3 py-3 text-right font-semibold text-textPrimary">{row.base_price ? formatNumericPrice(row, row.base_price) : formatMoney(row.harga)}</td>
+                  <td className="px-3 py-3 text-right font-semibold text-textPrimary">{formatNumericPrice(row, row.price_pph_025)}</td>
                   <td className="px-3 py-3 text-textSecondary">{row.waktu_update ?? snapshot.update_time ?? "-"}</td>
                   <td className={`px-3 py-3 text-right font-semibold ${deltaClass(row.delta)}`}>
                     {row.delta ?? "-"}
@@ -511,7 +554,7 @@ function PriceDataTable({ rows, emptyMessage, showContent = false }: { rows: Pri
                       className="grid h-8 w-8 place-items-center rounded-lg border border-border text-textSecondary"
                       title="Copy data"
                       aria-label="Copy data"
-                      onClick={() => navigator.clipboard.writeText(JSON.stringify({ snapshot, row }, null, 2))}
+                      onClick={() => copyTextWithFallback(JSON.stringify({ snapshot, row }, null, 2))}
                     >
                       <Clipboard className="h-4 w-4" />
                     </button>
@@ -521,7 +564,7 @@ function PriceDataTable({ rows, emptyMessage, showContent = false }: { rows: Pri
             })
           ) : (
             <tr>
-              <td colSpan={showContent ? 10 : 9} className="px-3 py-10 text-center text-textSecondary">
+              <td colSpan={showContent ? 11 : 10} className="px-3 py-10 text-center text-textSecondary">
                 {emptyMessage}
               </td>
             </tr>
@@ -1048,7 +1091,17 @@ function DraftEditorPanel({
             )}
             <button
               type="button"
-              onClick={() => navigator.clipboard.writeText(articleText)}
+              onClick={async () => {
+                const copied = await copyTextWithFallback(articleText);
+                pushNotifications([
+                  {
+                    id: crypto.randomUUID(),
+                    kind: copied ? "success" : "error",
+                    title: copied ? "Artikel berhasil disalin" : "Artikel gagal disalin",
+                    message: copied ? "Isi artikel sudah masuk ke clipboard." : "Clipboard browser tidak dapat diakses. Silakan blok teks artikel secara manual."
+                  }
+                ]);
+              }}
               className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-border bg-surface px-4 text-sm font-semibold text-primary"
             >
               <Clipboard className="h-4 w-4" />

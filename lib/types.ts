@@ -6,6 +6,16 @@ export type SourceRunStatus = "success" | "warning" | "error" | "manual";
 
 export type SourceName = string;
 
+export type SourceParserType = "generic-table" | "logam-mulia";
+
+export interface SourceFieldMapping {
+  weightIndex?: number;
+  priceIndex?: number;
+  basePriceIndex?: number;
+  pricePph025Index?: number;
+  productTypeIndex?: number;
+}
+
 export interface DashboardNotification {
   id: string;
   kind: NotificationKind;
@@ -28,9 +38,11 @@ export interface SourceConfig {
     | "emas-kecil"
     | "manual";
   selectorSummary: string;
+  parserType?: SourceParserType;
   titleSelector?: string;
   dataSelector?: string;
   rowSelector?: string;
+  fieldMapping?: SourceFieldMapping;
   timestampSelector?: string;
   elementKeywords: string[];
   includeKeywords?: string[];
@@ -99,6 +111,12 @@ export interface GoldPriceRow {
   source_name: SourceName;
   source_url: string;
   jenis_emas: string;
+  product_type?: string | null;
+  weight?: string | null;
+  base_price?: number | null;
+  price_pph_025?: number | null;
+  source?: SourceName;
+  scraped_at?: string | null;
   section_name?: string | null;
   category?: string | null;
   berat: string;

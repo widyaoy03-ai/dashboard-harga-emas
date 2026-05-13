@@ -101,9 +101,11 @@ function ensureMemorySeeded() {
 function selectorConfigFromSource(source: SourceConfig) {
   return {
     selectorSummary: source.selectorSummary,
+    parserType: source.parserType ?? (source.name === "Logam Mulia" ? "logam-mulia" : "generic-table"),
     titleSelector: source.titleSelector ?? "",
     dataSelector: source.dataSelector ?? "",
     rowSelector: source.rowSelector ?? "",
+    fieldMapping: source.fieldMapping ?? {},
     timestampSelector: source.timestampSelector ?? "",
     elementKeywords: source.elementKeywords,
     includeKeywords: source.includeKeywords ?? [],
@@ -125,9 +127,14 @@ function sourceRecordFromRow(row: Record<string, unknown>): AdminSourceRecord {
     mode: row.mode === "manual" ? "manual" : "otomatis",
     group,
     selectorSummary: String(selectorConfig.selectorSummary ?? ""),
+    parserType: selectorConfig.parserType === "logam-mulia" ? "logam-mulia" : "generic-table",
     titleSelector: selectorConfig.titleSelector ? String(selectorConfig.titleSelector) : undefined,
     dataSelector: selectorConfig.dataSelector ? String(selectorConfig.dataSelector) : undefined,
     rowSelector: selectorConfig.rowSelector ? String(selectorConfig.rowSelector) : undefined,
+    fieldMapping:
+      selectorConfig.fieldMapping && typeof selectorConfig.fieldMapping === "object"
+        ? (selectorConfig.fieldMapping as SourceConfig["fieldMapping"])
+        : undefined,
     timestampSelector: selectorConfig.timestampSelector ? String(selectorConfig.timestampSelector) : undefined,
     elementKeywords: Array.isArray(selectorConfig.elementKeywords) ? selectorConfig.elementKeywords.map(String) : [],
     includeKeywords: Array.isArray(selectorConfig.includeKeywords) ? selectorConfig.includeKeywords.map(String) : [],
@@ -292,9 +299,11 @@ export function adminSourceToConfig(source: AdminSourceRecord): SourceConfig {
     mode: source.mode,
     group: source.group,
     selectorSummary: source.selectorSummary,
+    parserType: source.parserType,
     titleSelector: source.titleSelector,
     dataSelector: source.dataSelector,
     rowSelector: source.rowSelector,
+    fieldMapping: source.fieldMapping,
     timestampSelector: source.timestampSelector,
     elementKeywords: source.elementKeywords,
     includeKeywords: source.includeKeywords,

@@ -1,3 +1,4 @@
+import { queryHtmlRows, queryHtmlSelections } from "./html-selector";
 import { getRuntimeSourcesForContent } from "./admin-storage";
 import { findPreviousSnapshot, saveSnapshots } from "./storage";
 import type { DashboardNotification, GoldPriceRow, GoldPriceSnapshot, Portal, SourceConfig } from "./types";
@@ -45,22 +46,13 @@ function htmlCellText(cell: string) {
   return stripTags(cell).replace(/\s+/g, " ").trim();
 }
 
-function scopedHtmlForSelector(html: string, selector?: string) {
-  if (!selector) return html;
-  const tableClass = selector.match(/table\.([a-z0-9_-]+)/i)?.[1];
-  if (!tableClass) return html;
-
-  const tablePattern = /<table\b[^>]*>[\s\S]*?<\/table>/gi;
-  const matchedTables = [...html.matchAll(tablePattern)]
-    .map((match) => match[0])
-    .filter((tableHtml) => new RegExp(`class=["'][^"']*\\b${tableClass}\\b`, "i").test(tableHtml));
-
-  return matchedTables.length ? matchedTables.join("\n") : html;
-}
-
 function tableRowsFromHtml(html: string, selector?: string) {
+  if (selector?.trim()) {
+    return queryHtmlRows(html, selector.trim()).map((row) => row.cells);
+  }
+
   const rows: string[][] = [];
-  const cleanHtml = scopedHtmlForSelector(html, selector).replace(/<!--[\s\S]*?-->/g, " ");
+  const cleanHtml = html.replace(/<!--[\s\S]*?-->/g, " ");
   for (const rowMatch of cleanHtml.matchAll(/<tr[\s\S]*?<\/tr>/gi)) {
     const rowHtml = rowMatch[0];
     const cells = [...rowHtml.matchAll(/<(?:td|th)[^>]*>([\s\S]*?)<\/(?:td|th)>/gi)]
@@ -69,6 +61,13 @@ function tableRowsFromHtml(html: string, selector?: string) {
     if (cells.length) rows.push(cells);
   }
   return rows;
+}
+
+function scopedTextFromSelector(html: string, selector: string | undefined, fallbackText: string) {
+  if (!selector?.trim()) return fallbackText;
+  const selections = queryHtmlSelections(html, selector.trim());
+  if (!selections.length) return "";
+  return selections.map((selection) => selection.text).join("\n");
 }
 
 function normalizeWeight(value: string) {
@@ -91,6 +90,16 @@ function looksLikeWeight(value: string) {
 function includesAny(value: string, keywords?: string[]) {
   const haystack = value.toLowerCase();
   return Boolean(keywords?.some((keyword) => keyword && haystack.includes(keyword.toLowerCase())));
+}
+
+function configuredRowSelector(source: SourceConfig) {
+  if (source.rowSelector?.trim()) return source.rowSelector.trim();
+  const dataSelector = source.dataSelector?.trim();
+  if (!dataSelector) return undefined;
+  if (dataSelector === "table" || dataSelector.includes("#") || dataSelector.includes(".") || dataSelector.includes(">") || dataSelector.includes("[") || /\btr\b/i.test(dataSelector)) {
+    return dataSelector;
+  }
+  return undefined;
 }
 
 function cleanPrice(raw: string, currency: "IDR" | "USD") {
@@ -176,6 +185,20 @@ function numberValue(value: string | null) {
   return Number(cleaned.replace(/\./g, ""));
 }
 
+function priceNumber(raw: string | undefined, currency: "IDR" | "USD") {
+  if (!raw) return null;
+  const formatted = cleanPrice(raw, currency);
+  return numberValue(formatted ?? raw);
+}
+
+function formatPriceNumber(value: number | null, currency: "IDR" | "USD") {
+  if (value === null || Number.isNaN(value)) return null;
+  if (currency === "USD") {
+    return `US$ ${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+  return `Rp ${value.toLocaleString("id-ID")}`;
+}
+
 function formatDelta(current: string | null, previous: string | null, currency: "IDR" | "USD") {
   const currentValue = numberValue(current);
   const previousValue = numberValue(previous);
@@ -199,13 +222,20 @@ function createPriceRow(
   harga: string | null,
   buyback: string | null,
   updateTime: string | null,
-  sectionName?: string | null
+  sectionName?: string | null,
+  meta: Partial<Pick<GoldPriceRow, "product_type" | "weight" | "base_price" | "price_pph_025" | "source" | "scraped_at">> = {}
 ): GoldPriceRow {
   return {
     id: crypto.randomUUID(),
     source_name: source.name,
     source_url: source.url,
     jenis_emas: jenisEmas,
+    product_type: meta.product_type ?? sectionName ?? jenisEmas,
+    weight: meta.weight ?? berat,
+    base_price: meta.base_price ?? priceNumber(harga ?? undefined, source.priceCurrency),
+    price_pph_025: meta.price_pph_025 ?? null,
+    source: meta.source ?? source.name,
+    scraped_at: meta.scraped_at ?? updateTime ?? nowIso(),
     section_name: sectionName ?? null,
     category: sectionName ?? null,
     berat,
@@ -231,22 +261,33 @@ function priceRowFromCells(
   if (includesAny(rowText, source.excludeKeywords)) return null;
   if (source.includeKeywords?.length && !includesAny(rowText, source.includeKeywords)) return null;
 
-  const weightCellIndex = cells.findIndex((cell) => looksLikeWeight(cell));
+  const mapping = source.fieldMapping ?? {};
+  const weightCellIndex = mapping.weightIndex ?? cells.findIndex((cell) => looksLikeWeight(cell));
   if (weightCellIndex < 0) return null;
 
   const berat = normalizeWeight(cells[weightCellIndex]);
-  const priceCells = cells.slice(weightCellIndex + 1).length ? cells.slice(weightCellIndex + 1) : cells;
-  const prices = priceCells
-    .map((cell) => cleanPrice(cell, source.priceCurrency))
-    .filter(Boolean) as string[];
+  const detectedPrices = cells.map((cell) => cleanPrice(cell, source.priceCurrency));
+  const priceIndex = mapping.priceIndex ?? mapping.basePriceIndex ?? detectedPrices.findIndex((price, index) => index > weightCellIndex && Boolean(price));
+  const basePriceIndex = mapping.basePriceIndex ?? priceIndex;
+  const pphIndex = mapping.pricePph025Index;
+  const mainPriceNumber = priceNumber(cells[priceIndex], source.priceCurrency);
+  const basePrice = priceNumber(cells[basePriceIndex], source.priceCurrency);
+  const pricePph025 = pphIndex === undefined ? null : priceNumber(cells[pphIndex], source.priceCurrency);
 
-  if (!prices.length) return null;
-  return createPriceRow(source, jenisEmas, berat, prices[0] ?? null, null, updateTime, sectionName);
+  if (mainPriceNumber === null && basePrice === null && pricePph025 === null) return null;
+  return createPriceRow(source, jenisEmas, berat, formatPriceNumber(mainPriceNumber ?? basePrice ?? pricePph025, source.priceCurrency), null, updateTime, sectionName, {
+    product_type: mapping.productTypeIndex === undefined ? sectionName ?? jenisEmas : cells[mapping.productTypeIndex],
+    weight: berat,
+    base_price: basePrice ?? mainPriceNumber,
+    price_pph_025: pricePph025,
+    source: source.name,
+    scraped_at: updateTime ?? nowIso()
+  });
 }
 
 function rowsFromHtmlTables(source: SourceConfig, jenisEmas: string, html: string, updateTime: string | null) {
   const rows: GoldPriceRow[] = [];
-  const tableRows = tableRowsFromHtml(html, source.rowSelector || source.dataSelector);
+  const tableRows = tableRowsFromHtml(html, configuredRowSelector(source));
   const hasBoundary = Boolean(source.boundaryStartKeywords?.length);
   let capturing = !hasBoundary;
 
@@ -281,7 +322,7 @@ function rowsFromLogamMuliaSections(source: SourceConfig, jenisKonten: string, h
   const rows: GoldPriceRow[] = [];
   let activeSection: string | null = null;
 
-  for (const cells of tableRowsFromHtml(html, source.rowSelector || source.dataSelector)) {
+  for (const cells of tableRowsFromHtml(html, configuredRowSelector(source))) {
     const rowText = cells.join(" ");
     const sectionHeading = findLogamMuliaSection(rowText);
 
@@ -291,7 +332,6 @@ function rowsFromLogamMuliaSections(source: SourceConfig, jenisKonten: string, h
     }
 
     if (!activeSection) continue;
-    if (!/\bRp\.?\s*\d/i.test(rowText)) continue;
 
     const row = priceRowFromCells(source, activeSection, cells, updateTime, activeSection);
     if (row) rows.push(row);
@@ -322,10 +362,10 @@ function rowsFromTextLines(source: SourceConfig, jenisEmas: string, text: string
 function dedupeRows(rows: GoldPriceRow[]) {
   const seen = new Set<string>();
   return rows.filter((row) => {
-    const key = `${row.source_name}|${row.berat}|${row.harga}|${row.buyback}`;
+    const key = `${row.source_name}|${row.category ?? ""}|${row.berat}|${row.harga}|${row.base_price ?? ""}|${row.price_pph_025 ?? ""}`;
     if (seen.has(key)) return false;
     seen.add(key);
-    return Boolean(row.harga || row.buyback);
+    return Boolean(row.harga || row.base_price || row.price_pph_025);
   });
 }
 
@@ -333,7 +373,7 @@ function extractPriceRows(source: SourceConfig, jenisKonten: string, html: strin
   const jenisEmas = inferJenisEmas(source, jenisKonten);
   const updateTime = findTimestamp(text);
 
-  if (source.name === "Logam Mulia") {
+  if (source.parserType === "logam-mulia" || source.name === "Logam Mulia") {
     return rowsFromLogamMuliaSections(source, jenisKonten, html, text);
   }
 
@@ -342,13 +382,17 @@ function extractPriceRows(source: SourceConfig, jenisKonten: string, html: strin
     return prices.length ? [createPriceRow(source, jenisEmas, "1 ons troi", prices[0], null, updateTime)] : [];
   }
 
+  const selector = configuredRowSelector(source);
+  const scopedText = selector ? scopedTextFromSelector(html, selector, text) : text;
   const tableRows = rowsFromHtmlTables(source, jenisEmas, html, updateTime);
-  const textRows = rowsFromTextLines(source, jenisEmas, text, updateTime);
+
+  const textRows = rowsFromTextLines(source, jenisEmas, scopedText, updateTime);
   const rows = dedupeRows([...tableRows, ...textRows]);
 
   if (rows.length) return rows.slice(0, 80);
+  if (selector) return [];
 
-  const fallbackPrices = priceCandidates(text, source.priceCurrency);
+  const fallbackPrices = priceCandidates(scopedText, source.priceCurrency);
   return fallbackPrices.length ? [createPriceRow(source, jenisEmas, "Satuan utama", fallbackPrices[0], null, updateTime)] : [];
 }
 
@@ -494,27 +538,60 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
 }
 
 export async function previewSourceScrape(source: SourceConfig, jenisKonten = source.group === "perak" ? "Harga Perak" : "Harga Emas") {
+  const selector = configuredRowSelector(source) || "";
+  const previewedAt = nowIso();
   if (source.mode === "manual") {
     return {
       ok: false,
-      selector: source.rowSelector || source.dataSelector || "",
+      selector,
+      previewedAt,
       rowsFound: 0,
+      validRows: 0,
       rows: [] as GoldPriceRow[],
       message: `${source.name} berstatus manual, tidak menjalankan scraping otomatis.`
     };
   }
 
-  const fetched = await fetchHtml(source.url);
-  const visibleText = stripTags(fetched.html);
-  const rows = fetched.ok ? extractPriceRows(source, jenisKonten, fetched.html, visibleText) : [];
+  try {
+    const fetched = await fetchHtml(source.url);
+    if (!fetched.ok || fetched.html.length < 200) {
+      return {
+        ok: false,
+        selector,
+        previewedAt,
+        rowsFound: 0,
+        validRows: 0,
+        rows: [] as GoldPriceRow[],
+        message: `URL tidak bisa diakses atau konten kosong. HTTP ${fetched.status}.`
+      };
+    }
 
-  return {
-    ok: fetched.ok && rows.length > 0,
-    selector: source.rowSelector || source.dataSelector || "",
-    rowsFound: rows.length,
-    rows: rows.slice(0, 20),
-    message: fetched.ok ? `Preview menemukan ${rows.length} row harga.` : `Source merespons HTTP ${fetched.status}.`
-  };
+    const visibleText = stripTags(fetched.html);
+    const candidateRows = selector ? tableRowsFromHtml(fetched.html, selector).length : tableRowsFromHtml(fetched.html).length;
+    const rows = extractPriceRows(source, jenisKonten, fetched.html, visibleText);
+
+    return {
+      ok: rows.length > 0,
+      selector,
+      previewedAt,
+      rowsFound: candidateRows,
+      validRows: rows.length,
+      rows: rows.slice(0, 20),
+      message: rows.length
+        ? `Preview menemukan ${rows.length} data valid dari ${candidateRows} row.`
+        : `Selector berhasil dijalankan, tetapi tidak ada data harga valid dari ${candidateRows} row.`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      selector,
+      previewedAt,
+      rowsFound: 0,
+      validRows: 0,
+      rows: [] as GoldPriceRow[],
+      message: error instanceof Error ? `Preview gagal: ${error.message}` : "Preview gagal karena kesalahan sistem."
+    };
+  }
 }
 
 export async function runData(portal: Portal, jenisKonten: string, selectedSources?: string[] | string | null) {

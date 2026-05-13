@@ -10,9 +10,19 @@ const previewSchema = z.object({
   mode: z.enum(["otomatis", "manual"]),
   group: z.enum(["antam", "perak", "dunia", "perhiasan", "pegadaian", "digital", "emas-kecil", "manual"]),
   selectorSummary: z.string().optional().default(""),
+  parserType: z.enum(["generic-table", "logam-mulia"]).optional(),
   titleSelector: z.string().optional(),
   dataSelector: z.string().optional(),
   rowSelector: z.string().optional(),
+  fieldMapping: z
+    .object({
+      weightIndex: z.number().int().nonnegative().optional(),
+      priceIndex: z.number().int().nonnegative().optional(),
+      basePriceIndex: z.number().int().nonnegative().optional(),
+      pricePph025Index: z.number().int().nonnegative().optional(),
+      productTypeIndex: z.number().int().nonnegative().optional()
+    })
+    .optional(),
   timestampSelector: z.string().optional(),
   elementKeywords: z.array(z.string()).default([]),
   includeKeywords: z.array(z.string()).default([]),
@@ -44,9 +54,11 @@ export async function POST(request: Request) {
     mode: parsed.data.mode,
     group: parsed.data.group,
     selectorSummary: parsed.data.selectorSummary,
+    parserType: parsed.data.parserType ?? "generic-table",
     titleSelector: parsed.data.titleSelector || undefined,
     dataSelector: parsed.data.dataSelector || undefined,
     rowSelector: parsed.data.rowSelector || undefined,
+    fieldMapping: parsed.data.fieldMapping,
     timestampSelector: parsed.data.timestampSelector || undefined,
     elementKeywords: parsed.data.elementKeywords,
     includeKeywords: parsed.data.includeKeywords,
