@@ -55,6 +55,59 @@ type SourcePreviewResponse = {
   };
 };
 
+type SourceDocumentValidationResponse = {
+  ok: boolean;
+  status: "VALID" | "INVALID";
+  notification?: DashboardNotification;
+  extraction: {
+    sourceName: string;
+    fileName: string;
+    url: string;
+    rowSelector: string;
+    parserType: "logam-mulia";
+    fieldMapping: {
+      weightIndex?: number;
+      priceIndex?: number;
+      basePriceIndex?: number;
+      pricePph025Index?: number;
+    };
+    requiredFields: {
+      fields: string[];
+      labels: Record<string, string>;
+    };
+    sections: string[];
+    jenisKonten: string;
+    rawTextSample: string;
+    source: Omit<AdminSourceRecord, "id" | "is_active" | "content_mapping">;
+    extractionNotes: string[];
+  };
+  validation: {
+    ok: boolean;
+    status: "VALID" | "INVALID";
+    selector: string;
+    checkedAt: string;
+    checks: {
+      urlAccessible: boolean;
+      selectorFound: boolean;
+      rowFound: boolean;
+      fieldMappingValid: boolean;
+      dataParsed: boolean;
+    };
+    reasons: string[];
+    recommendations: string[];
+    debug: {
+      selector: string;
+      elementCount: number;
+      rowCount: number;
+      validDataCount: number;
+      sampleHtml: string;
+      sampleParsedRow: GoldPriceRow | null;
+      checkedAt: string;
+    };
+    rows: GoldPriceRow[];
+  };
+};
+
 const adminTabs: AdminTab[] = ["Pengaturan Source", "Template Artikel", "Upload Histori", "Monitoring Source"];
 
 const emptySource: AdminSourceRecord = {
@@ -143,6 +196,10 @@ async function readResponse<T>(response: Response): Promise<T> {
   return data as T;
 }
 
+function formatAuditPrice(value?: number | null) {
+  return typeof value === "number" ? value.toLocaleString("id-ID") : "-";
+}
+
 export function AdminCMSPanel() {
   const queryClient = useQueryClient();
   const pushNotifications = useDashboardStore((state) => state.pushNotifications);
@@ -156,6 +213,8 @@ export function AdminCMSPanel() {
   const [historyFile, setHistoryFile] = useState<File | null>(null);
   const [sourcePreview, setSourcePreview] = useState<SourcePreviewResponse["preview"] | null>(null);
   const [sourcePreviewKey, setSourcePreviewKey] = useState("");
+  const [sourceDocumentFile, setSourceDocumentFile] = useState<File | null>(null);
+  const [sourceDocumentAudit, setSourceDocumentAudit] = useState<SourceDocumentValidationResponse | null>(null);
 
   const mappings = useMemo(
     () =>
@@ -192,6 +251,36 @@ export function AdminCMSPanel() {
 
   function pushApiNotification(payload: { notification?: DashboardNotification; message?: string }, fallback: DashboardNotification) {
     pushNotifications(payload.notification ? [payload.notification] : [fallback]);
+  }
+
+  function applySourceDocumentAudit(audit: SourceDocumentValidationResponse) {
+    const mappingsFromAudit: SourceContentMapping[] =
+      audit.extraction.jenisKonten === "Harga Perak"
+        ? [{ portal: "Beritasatu", jenis_konten: "Harga Perak" }]
+        : [
+            { portal: "Beritasatu", jenis_konten: "Harga Emas" },
+            { portal: "Investor Daily", jenis_konten: "Harga Emas ANTAM" }
+          ];
+    const nextSource: AdminSourceRecord = {
+      ...emptySource,
+      ...audit.extraction.source,
+      id: "",
+      is_active: true,
+      content_mapping: mappingsFromAudit
+    };
+    setSourceForm(nextSource);
+    setSourcePreview({
+      ok: audit.validation.ok,
+      selector: audit.validation.selector,
+      previewedAt: audit.validation.checkedAt,
+      rowsFound: audit.validation.debug.rowCount,
+      validRows: audit.validation.debug.validDataCount,
+      rows: audit.validation.rows,
+      message: audit.validation.ok
+        ? `Validasi dokumen menemukan ${audit.validation.debug.validDataCount} data valid.`
+        : audit.validation.reasons[0] ?? "Validasi dokumen belum valid."
+    });
+    setSourcePreviewKey(sourcePreviewSignature(nextSource));
   }
 
   const saveSourceMutation = useMutation({
@@ -283,6 +372,41 @@ export function AdminCMSPanel() {
           kind: "error",
           title: "Preview scrape gagal",
           message: payload.message ?? "Periksa ADMIN_TOKEN, URL, atau selector source."
+        }
+      ]);
+    }
+  });
+
+  const sourceDocumentMutation = useMutation({
+    mutationFn: async () => {
+      if (!sourceDocumentFile) throw new Error("Pilih file DOCX source Logam Mulia terlebih dahulu.");
+      const form = new FormData();
+      form.set("file", sourceDocumentFile);
+      return readResponse<SourceDocumentValidationResponse>(
+        await fetch("/api/admin/source-document-validation", {
+          method: "POST",
+          headers: adminHeaders(adminToken, false),
+          body: form
+        })
+      );
+    },
+    onSuccess: (data) => {
+      setSourceDocumentAudit(data);
+      pushApiNotification(data, {
+        id: crypto.randomUUID(),
+        kind: data.ok ? "success" : "warning",
+        title: data.ok ? "Dokumen source valid" : "Dokumen source perlu dicek",
+        message: data.ok ? "Validasi source Logam Mulia berhasil." : data.validation.reasons[0] ?? "Validasi source belum berhasil."
+      });
+    },
+    onError: (error) => {
+      const payload = error as { message?: string };
+      pushNotifications([
+        {
+          id: crypto.randomUUID(),
+          kind: "error",
+          title: "Validasi dokumen gagal",
+          message: payload.message ?? "Dokumen source tidak dapat diproses."
         }
       ]);
     }
@@ -443,6 +567,186 @@ export function AdminCMSPanel() {
 
       {activeAdminTab === "Pengaturan Source" && (
         <div className="mt-5 grid gap-5 xl:grid-cols-[420px_1fr]">
+          <div className="rounded-lg border border-border bg-background p-4 xl:col-span-2">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h3 className="text-base font-bold text-primary">Audit Dokumen Source Logam Mulia</h3>
+                <p className="mt-1 text-sm text-textSecondary">
+                  Upload dokumen source untuk mengekstrak URL, selector, section, dan mapping kolom. Sistem akan mengetesnya ke website real sebelum config dipakai.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <label className="inline-flex h-11 cursor-pointer items-center gap-2 rounded-lg border border-border bg-surface px-4 text-sm font-semibold text-textSecondary">
+                  <UploadCloud className="h-4 w-4" />
+                  <input
+                    className="sr-only"
+                    type="file"
+                    accept=".docx"
+                    onChange={(event) => {
+                      setSourceDocumentFile(event.target.files?.[0] ?? null);
+                      setSourceDocumentAudit(null);
+                    }}
+                  />
+                  {sourceDocumentFile ? sourceDocumentFile.name : "Pilih DOCX Source"}
+                </label>
+                <button
+                  type="button"
+                  onClick={() => sourceDocumentMutation.mutate()}
+                  disabled={sourceDocumentMutation.isPending || !sourceDocumentFile}
+                  className="inline-flex h-11 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-semibold text-white disabled:opacity-70"
+                >
+                  <Activity className="h-4 w-4" />
+                  Validasi Dokumen Source
+                </button>
+              </div>
+            </div>
+
+            {sourceDocumentAudit && (
+              <div className="mt-4 grid gap-4 xl:grid-cols-[360px_1fr]">
+                <div className="rounded-lg border border-border bg-surface p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-bold text-textPrimary">Status Validasi</p>
+                    <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(sourceDocumentAudit.ok ? "success" : "error")}`}>
+                      {sourceDocumentAudit.status}
+                    </span>
+                  </div>
+                  <dl className="mt-3 grid gap-2 text-xs text-textSecondary">
+                    <div>
+                      <dt className="font-semibold text-textPrimary">URL</dt>
+                      <dd className="break-all">{sourceDocumentAudit.extraction.url || "Tidak ditemukan"}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-semibold text-textPrimary">Selector dipakai</dt>
+                      <dd>{sourceDocumentAudit.validation.selector || "-"}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-semibold text-textPrimary">Section</dt>
+                      <dd>{sourceDocumentAudit.extraction.sections.join(", ")}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-semibold text-textPrimary">Field mapping</dt>
+                      <dd>td[0] weight, td[1] base_price, td[2] price_pph_025</dd>
+                    </div>
+                  </dl>
+                  <div className="mt-3 grid gap-1 text-xs">
+                    {[
+                      ["URL dapat diakses", sourceDocumentAudit.validation.checks.urlAccessible],
+                      ["Selector ditemukan", sourceDocumentAudit.validation.checks.selectorFound],
+                      ["Row ditemukan", sourceDocumentAudit.validation.checks.rowFound],
+                      ["Field mapping sesuai", sourceDocumentAudit.validation.checks.fieldMappingValid],
+                      ["Data berhasil diparse", sourceDocumentAudit.validation.checks.dataParsed]
+                    ].map(([label, valid]) => (
+                      <div key={String(label)} className="flex items-center justify-between gap-3 rounded-md bg-background px-2 py-1.5">
+                        <span className="text-textSecondary">{label}</span>
+                        <span className={`font-semibold ${valid ? "text-emerald-700" : "text-red-700"}`}>{valid ? "Ya" : "Tidak"}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {!!sourceDocumentAudit.validation.reasons.length && (
+                    <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                      <p className="font-bold">Alasan invalid</p>
+                      <ul className="mt-1 list-disc space-y-1 pl-4">
+                        {sourceDocumentAudit.validation.reasons.map((reason) => (
+                          <li key={reason}>{reason}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {!!sourceDocumentAudit.validation.recommendations.length && (
+                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                      <p className="font-bold">Rekomendasi selector</p>
+                      <ul className="mt-1 list-disc space-y-1 pl-4">
+                        {sourceDocumentAudit.validation.recommendations.map((recommendation) => (
+                          <li key={recommendation}>{recommendation}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => applySourceDocumentAudit(sourceDocumentAudit)}
+                    className="mt-3 inline-flex h-10 w-full items-center justify-center rounded-lg border border-primary text-sm font-semibold text-primary"
+                  >
+                    Gunakan Config Ini di Form Source
+                  </button>
+                </div>
+
+                <div className="grid gap-4">
+                  <div className="rounded-lg border border-border bg-surface p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-bold text-textPrimary">Preview Hasil Scrape</p>
+                      <p className="text-xs text-textSecondary">
+                        Row ditemukan: {sourceDocumentAudit.validation.debug.rowCount} | Data valid: {sourceDocumentAudit.validation.debug.validDataCount}
+                      </p>
+                    </div>
+                    <div className="mt-3 max-h-64 overflow-auto rounded-lg border border-border">
+                      <table className="w-full min-w-[620px] border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-border bg-background text-left text-textSecondary">
+                            <th className="px-2 py-2">Berat</th>
+                            <th className="px-2 py-2 text-right">Harga Dasar</th>
+                            <th className="px-2 py-2 text-right">Harga + Pajak PPh 0.25%</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sourceDocumentAudit.validation.rows.map((row) => (
+                            <tr key={row.id} className="border-b border-border/60">
+                              <td className="px-2 py-2">{row.weight ?? row.berat}</td>
+                              <td className="px-2 py-2 text-right font-semibold">{formatAuditPrice(row.base_price)}</td>
+                              <td className="px-2 py-2 text-right font-semibold">{formatAuditPrice(row.price_pph_025)}</td>
+                            </tr>
+                          ))}
+                          {!sourceDocumentAudit.validation.rows.length && (
+                            <tr>
+                              <td colSpan={3} className="px-2 py-5 text-center text-textSecondary">
+                                Belum ada data valid dari hasil audit dokumen.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <div className="rounded-lg border border-border bg-surface p-3">
+                      <p className="text-sm font-bold text-textPrimary">Debug Info</p>
+                      <dl className="mt-2 grid gap-1 text-xs text-textSecondary">
+                        <div className="flex justify-between gap-3">
+                          <dt>Element ditemukan</dt>
+                          <dd className="font-semibold text-textPrimary">{sourceDocumentAudit.validation.debug.elementCount}</dd>
+                        </div>
+                        <div className="flex justify-between gap-3">
+                          <dt>Row ditemukan</dt>
+                          <dd className="font-semibold text-textPrimary">{sourceDocumentAudit.validation.debug.rowCount}</dd>
+                        </div>
+                        <div className="flex justify-between gap-3">
+                          <dt>Sample parsed row</dt>
+                          <dd className="text-right font-semibold text-textPrimary">
+                            {sourceDocumentAudit.validation.debug.sampleParsedRow
+                              ? `${sourceDocumentAudit.validation.debug.sampleParsedRow.weight ?? sourceDocumentAudit.validation.debug.sampleParsedRow.berat} / ${formatAuditPrice(sourceDocumentAudit.validation.debug.sampleParsedRow.base_price)}`
+                              : "-"}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-3">
+                          <dt>Waktu validasi</dt>
+                          <dd className="text-right font-semibold text-textPrimary">
+                            {new Date(sourceDocumentAudit.validation.debug.checkedAt).toLocaleString("id-ID")}
+                          </dd>
+                        </div>
+                      </dl>
+                    </div>
+                    <div className="rounded-lg border border-border bg-surface p-3">
+                      <p className="text-sm font-bold text-textPrimary">Sample HTML</p>
+                      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-background p-2 text-[11px] leading-relaxed text-textSecondary">
+                        {sourceDocumentAudit.validation.debug.sampleHtml || "Tidak ada sample HTML."}
+                      </pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
           <div className="rounded-lg border border-border bg-background p-4">
               <div className="flex items-center justify-between gap-3">
               <h3 className="text-base font-bold text-primary">Form Source</h3>

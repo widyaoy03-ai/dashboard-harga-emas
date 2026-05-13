@@ -19,6 +19,12 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function wait(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function decodeEntities(value: string) {
   return value
     .replace(/&nbsp;/g, " ")
@@ -308,36 +314,125 @@ function rowsFromHtmlTables(source: SourceConfig, jenisEmas: string, html: strin
   return rows;
 }
 
-const logamMuliaSections = ["Emas Batangan", "Gift Series", "Perak Murni", "Perak Heritage", "Perak", "Heritage"];
-
-function findLogamMuliaSection(rowText: string) {
-  const normalized = rowText.replace(/\s+/g, " ").trim();
-  return logamMuliaSections.find((section) => new RegExp(`\\b${section}\\b`, "i").test(normalized)) ?? null;
+function tableRowSelectionsFromHtml(html: string, selector?: string) {
+  const selected = selector?.trim() ? queryHtmlSelections(html, selector.trim()) : queryHtmlSelections(html, "tr");
+  return selected
+    .flatMap((selection) => (selection.tagName === "tr" ? [selection] : queryHtmlSelections(selection.html, "tr")))
+    .filter((row) => row.cells.length);
 }
 
-function rowsFromLogamMuliaSections(source: SourceConfig, jenisKonten: string, html: string, text: string) {
+const logamMuliaProductSections = ["Emas Batangan", "Perak Murni", "Perak Heritage"] as const;
+type LogamMuliaProductSection = (typeof logamMuliaProductSections)[number];
+
+const logamMuliaSectionSlugs: Record<LogamMuliaProductSection, "emas_batangan" | "perak_murni" | "perak_heritage"> = {
+  "Emas Batangan": "emas_batangan",
+  "Perak Murni": "perak_murni",
+  "Perak Heritage": "perak_heritage"
+};
+
+function isLogamMuliaProductSection(value: string): value is LogamMuliaProductSection {
+  const normalized = value.replace(/\s+/g, " ").trim().toLowerCase();
+  return logamMuliaProductSections.some((section) => normalized.includes(section.toLowerCase()));
+}
+
+function sectionTitleFromRow(row: ReturnType<typeof queryHtmlSelections>[number]) {
+  const hasHeaderCell = /<th\b/i.test(row.html);
+  const hasDataCell = /<td\b/i.test(row.html);
+  const isColspanHeader = /<th\b[^>]*\bcolspan\s*=/i.test(row.html);
+  const isSingleHeaderCell = row.cells.length === 1 && hasHeaderCell && !hasDataCell;
+  if (!isColspanHeader && !isSingleHeaderCell) return null;
+
+  const title = row.cells.join(" ").replace(/\s+/g, " ").trim();
+  if (!title || looksLikeWeight(title)) return null;
+  if (row.cells.length > 1 && /berat|harga\s+dasar|pajak|pph|ppn/i.test(title)) return null;
+  return title;
+}
+
+function matchTargetSection(sectionTitle: string, targetSections: string[]) {
+  const normalized = sectionTitle.replace(/\s+/g, " ").trim().toLowerCase();
+  return targetSections.find((section) => normalized.includes(section.toLowerCase())) ?? null;
+}
+
+function extractLogamMuliaSectionRows(
+  source: SourceConfig,
+  sectionName: LogamMuliaProductSection,
+  html: string,
+  text: string
+) {
   const updateTime = findTimestamp(text);
-  const isPerak = jenisKonten.toLowerCase().includes("perak");
-  const targetSections = isPerak ? ["Perak Murni", "Perak Heritage"] : ["Emas Batangan"];
   const rows: GoldPriceRow[] = [];
-  let activeSection: string | null = null;
+  let capturing = false;
+  let targetSectionFound = false;
+  let stoppedAtSection: string | null = null;
+  let inspectedRows = 0;
+  let invalidRowsSkipped = 0;
 
-  for (const cells of tableRowsFromHtml(html, configuredRowSelector(source))) {
-    const rowText = cells.join(" ");
-    const sectionHeading = findLogamMuliaSection(rowText);
+  for (const rowSelection of tableRowSelectionsFromHtml(html, configuredRowSelector(source))) {
+    inspectedRows += 1;
+    const cells = rowSelection.cells;
+    const sectionTitle = sectionTitleFromRow(rowSelection);
 
-    if (sectionHeading) {
-      activeSection = targetSections.includes(sectionHeading) ? sectionHeading : null;
+    if (sectionTitle) {
+      const matchedTarget = matchTargetSection(sectionTitle, [sectionName]);
+      if (matchedTarget === sectionName) {
+        capturing = true;
+        targetSectionFound = true;
+        continue;
+      }
+      if (capturing) stoppedAtSection = sectionTitle;
+      if (capturing) break;
       continue;
     }
 
-    if (!activeSection) continue;
+    if (!capturing) continue;
+    if (!/<td\b/i.test(rowSelection.html)) continue;
+    if (cells.length < 3) {
+      stoppedAtSection = "struktur row berubah";
+      invalidRowsSkipped += 1;
+      continue;
+    }
+    if (!looksLikeWeight(cells[0] ?? "")) {
+      invalidRowsSkipped += 1;
+      continue;
+    }
+    if (priceNumber(cells[1] ?? "", source.priceCurrency) === null || priceNumber(cells[2] ?? "", source.priceCurrency) === null) {
+      invalidRowsSkipped += 1;
+      continue;
+    }
 
-    const row = priceRowFromCells(source, activeSection, cells, updateTime, activeSection);
+    const row = priceRowFromCells(source, sectionName, cells, updateTime, sectionName);
     if (row) rows.push(row);
   }
 
-  return dedupeRows(rows).slice(0, 80);
+  return {
+    rows: dedupeRows(rows).slice(0, 80),
+    targetSectionFound,
+    stoppedAtSection,
+    inspectedRows,
+    invalidRowsSkipped
+  };
+}
+
+function targetLogamMuliaSectionsForContent(jenisKonten: string): LogamMuliaProductSection[] {
+  if (jenisKonten.toLowerCase().includes("perak")) return ["Perak Murni", "Perak Heritage"];
+  return ["Emas Batangan"];
+}
+
+function parseLogamMuliaSections(source: SourceConfig, jenisKonten: string, html: string, text: string) {
+  const targetSections = targetLogamMuliaSectionsForContent(jenisKonten);
+  const parsed = targetSections.map((sectionName) => extractLogamMuliaSectionRows(source, sectionName, html, text));
+  return {
+    rows: dedupeRows(parsed.flatMap((section) => section.rows)).slice(0, 80),
+    targetSectionFound: parsed.some((section) => section.targetSectionFound),
+    stoppedAtSection: parsed.find((section) => section.stoppedAtSection)?.stoppedAtSection ?? null,
+    inspectedRows: Math.max(...parsed.map((section) => section.inspectedRows), 0),
+    invalidRowsSkipped: parsed.reduce((total, section) => total + section.invalidRowsSkipped, 0),
+    sections: Object.fromEntries(targetSections.map((sectionName, index) => [sectionName, parsed[index]]))
+  };
+}
+
+function rowsFromLogamMuliaSections(source: SourceConfig, jenisKonten: string, html: string, text: string) {
+  return parseLogamMuliaSections(source, jenisKonten, html, text).rows;
 }
 
 function rowsFromTextLines(source: SourceConfig, jenisEmas: string, text: string, updateTime: string | null) {
@@ -420,26 +515,148 @@ function applyHistoricalComparison(rows: GoldPriceRow[], previous: GoldPriceSnap
   });
 }
 
-async function fetchHtml(url: string) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
-  try {
-    const response = await fetch(url, {
-      headers: {
-        "user-agent": userAgent,
-        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
-      },
-      redirect: "follow",
-      signal: controller.signal,
-      cache: "no-store"
-    });
+async function fetchHtml(url: string, maxAttempts = 2) {
+  let lastError: unknown = null;
 
-    const html = await response.text();
-    return { ok: response.ok, status: response.status, finalUrl: response.url, html };
-  } finally {
-    clearTimeout(timeout);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "user-agent": userAgent,
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
+        },
+        redirect: "follow",
+        signal: controller.signal,
+        cache: "no-store"
+      });
+
+      const html = await response.text();
+      if (response.ok || attempt === maxAttempts) return { ok: response.ok, status: response.status, finalUrl: response.url, html };
+      console.warn(`[scraper] Fetch ${url} returned HTTP ${response.status}. Retry ${attempt}/${maxAttempts}.`);
+    } catch (error) {
+      lastError = error;
+      console.warn(`[scraper] Fetch ${url} failed on attempt ${attempt}/${maxAttempts}.`, error);
+      if (attempt === maxAttempts) break;
+    } finally {
+      clearTimeout(timeout);
+    }
+    await wait(600 * attempt);
   }
+
+  return {
+    ok: false,
+    status: 0,
+    finalUrl: url,
+    html: "",
+    error: lastError instanceof Error ? lastError.message : "Fetch source gagal."
+  };
+}
+
+function createLogamMuliaSourceConfig(url: string): SourceConfig {
+  return {
+    name: "Logam Mulia",
+    url,
+    mode: "otomatis",
+    group: "antam",
+    selectorSummary: "Section-aware parser untuk Emas Batangan, Perak Murni, dan Perak Heritage",
+    parserType: "logam-mulia",
+    dataSelector: "table.table-bordered",
+    rowSelector: "table.table-bordered tr",
+    fieldMapping: {
+      weightIndex: 0,
+      priceIndex: 1,
+      basePriceIndex: 1,
+      pricePph025Index: 2
+    },
+    elementKeywords: [...logamMuliaProductSections],
+    includeKeywords: [],
+    excludeKeywords: [],
+    boundaryStartKeywords: [...logamMuliaProductSections],
+    boundaryStopKeywords: ["Gift Series", "Imlek", "Batik"],
+    priceCurrency: "IDR",
+    operationalNote: "Parser khusus Logam Mulia berbasis section marker."
+  };
+}
+
+function logamMuliaOutputItem(row: GoldPriceRow) {
+  const priceWithTax = row.price_pph_025 ?? priceNumber(row.harga ?? undefined, "IDR");
+  return {
+    weight: row.weight ?? row.berat,
+    base_price: row.base_price ?? priceNumber(row.harga ?? undefined, "IDR"),
+    price_pph_025: priceWithTax,
+    final_price: priceWithTax
+  };
+}
+
+export async function scrapeLogamMuliaProducts(url = "https://www.logammulia.com/id/harga-emas-hari-ini") {
+  const source = createLogamMuliaSourceConfig(url);
+
+  const fetched = await fetchHtml(url, 3);
+  if (!fetched.ok || fetched.html.length < 200) {
+    console.warn("[scraper:logam-mulia] URL tidak bisa diakses atau HTML kosong.", { url, status: fetched.status });
+    throw new Error(`Logam Mulia tidak dapat diakses. HTTP ${fetched.status}.`);
+  }
+
+  const visibleText = stripTags(fetched.html);
+  const products = {
+    emas_batangan: [] as ReturnType<typeof logamMuliaOutputItem>[],
+    perak_murni: [] as ReturnType<typeof logamMuliaOutputItem>[],
+    perak_heritage: [] as ReturnType<typeof logamMuliaOutputItem>[]
+  };
+  const debug: Record<string, { sectionFound: boolean; rowCount: number; inspectedRows: number; invalidRowsSkipped: number; stoppedAtSection: string | null }> = {};
+
+  for (const sectionName of logamMuliaProductSections) {
+    const parsed = extractLogamMuliaSectionRows(source, sectionName, fetched.html, visibleText);
+    const slug = logamMuliaSectionSlugs[sectionName];
+    products[slug] = parsed.rows.map(logamMuliaOutputItem);
+    debug[slug] = {
+      sectionFound: parsed.targetSectionFound,
+      rowCount: parsed.rows.length,
+      inspectedRows: parsed.inspectedRows,
+      invalidRowsSkipped: parsed.invalidRowsSkipped,
+      stoppedAtSection: parsed.stoppedAtSection
+    };
+
+    if (!parsed.targetSectionFound) {
+      console.warn(`[scraper:logam-mulia] Section ${sectionName} tidak ditemukan. Melanjutkan section lain.`, {
+        url,
+        inspectedRows: parsed.inspectedRows
+      });
+    } else if (!parsed.rows.length) {
+      console.warn(`[scraper:logam-mulia] Section ${sectionName} ditemukan, tetapi row harga valid kosong.`, {
+        url,
+        inspectedRows: parsed.inspectedRows,
+        invalidRowsSkipped: parsed.invalidRowsSkipped,
+        stoppedAtSection: parsed.stoppedAtSection
+      });
+    }
+  }
+
+  const totalRows = Object.values(products).reduce((total, rows) => total + rows.length, 0);
+  if (!totalRows) {
+    throw new Error("Semua section Logam Mulia kosong atau struktur HTML berubah.");
+  }
+
+  return {
+    source: "logam_mulia" as const,
+    scraped_at: nowIso(),
+    products,
+    debug
+  };
+}
+
+export async function scrapeLogamMuliaEmasBatangan(url = "https://www.logammulia.com/id/harga-emas-hari-ini") {
+  const result = await scrapeLogamMuliaProducts(url);
+  if (!result.products.emas_batangan.length) throw new Error("Data harga Emas Batangan kosong atau struktur row berubah.");
+  return {
+    source: result.source,
+    product_type: "emas_batangan" as const,
+    scraped_at: result.scraped_at,
+    items: result.products.emas_batangan
+  };
 }
 
 async function runSingleSource(portal: Portal, jenisKonten: string, source: SourceConfig): Promise<GoldPriceSnapshot> {
@@ -591,6 +808,143 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
       rows: [] as GoldPriceRow[],
       message: error instanceof Error ? `Preview gagal: ${error.message}` : "Preview gagal karena kesalahan sistem."
     };
+  }
+}
+
+export async function validateSourceScrape(source: SourceConfig, jenisKonten = source.group === "perak" ? "Harga Perak" : "Harga Emas") {
+  const selector = configuredRowSelector(source) || source.dataSelector?.trim() || "";
+  const checkedAt = nowIso();
+  const checks = {
+    urlAccessible: false,
+    selectorFound: false,
+    rowFound: false,
+    fieldMappingValid: false,
+    dataParsed: false
+  };
+  const reasons: string[] = [];
+  const recommendations: string[] = [];
+  let elementCount = 0;
+  let rowCount = 0;
+  let validDataCount = 0;
+  let sampleHtml = "";
+  let sampleParsedRow: GoldPriceRow | null = null;
+
+  const invalidResult = () => ({
+    ok: false,
+    status: "INVALID" as const,
+    selector,
+    checkedAt,
+    checks,
+    reasons,
+    recommendations,
+    debug: {
+      selector,
+      elementCount,
+      rowCount,
+      validDataCount,
+      sampleHtml,
+      sampleParsedRow,
+      checkedAt
+    },
+    rows: [] as GoldPriceRow[]
+  });
+
+  if (source.mode === "manual") {
+    reasons.push(`${source.name} berstatus manual, validasi scraping otomatis tidak dijalankan.`);
+    recommendations.push("Aktifkan mode otomatis jika source ini perlu divalidasi sebagai scraping source.");
+    return invalidResult();
+  }
+
+  try {
+    const fetched = await fetchHtml(source.url);
+    checks.urlAccessible = fetched.ok && fetched.html.length >= 200;
+
+    if (!checks.urlAccessible) {
+      reasons.push(`URL tidak bisa diakses atau konten kosong. HTTP ${fetched.status}.`);
+      recommendations.push("Periksa URL source, akses publik halaman, atau proteksi anti-bot dari website tujuan.");
+      return invalidResult();
+    }
+
+    let matchedElements: ReturnType<typeof queryHtmlSelections> = [];
+    try {
+      matchedElements = selector ? queryHtmlSelections(fetched.html, selector) : queryHtmlSelections(fetched.html, "tr");
+    } catch (error) {
+      reasons.push(`Selector tidak valid: ${error instanceof Error ? error.message : "format selector tidak dapat dibaca"}.`);
+      recommendations.push("Gunakan CSS selector row yang langsung mengarah ke baris tabel, misalnya table.table-bordered tr.");
+      return invalidResult();
+    }
+
+    elementCount = matchedElements.length;
+    checks.selectorFound = elementCount > 0;
+    sampleHtml = matchedElements[0]?.html?.slice(0, 1200) ?? "";
+
+    try {
+      rowCount = selector ? tableRowsFromHtml(fetched.html, selector).length : tableRowsFromHtml(fetched.html).length;
+    } catch (error) {
+      reasons.push(`Row tidak bisa dibaca dari selector: ${error instanceof Error ? error.message : "selector tidak dapat diproses"}.`);
+      recommendations.push("Pastikan selector mengarah ke row tabel, bukan container besar atau elemen non-table.");
+      return invalidResult();
+    }
+
+    checks.rowFound = rowCount > 0;
+
+    const rows = extractPriceRows(source, jenisKonten, fetched.html, stripTags(fetched.html));
+    validDataCount = rows.length;
+    checks.dataParsed = validDataCount > 0;
+    sampleParsedRow = rows[0] ?? null;
+    checks.fieldMappingValid = Boolean(
+      sampleParsedRow?.weight &&
+        typeof sampleParsedRow.base_price === "number" &&
+        typeof sampleParsedRow.price_pph_025 === "number"
+    );
+
+    if (!checks.selectorFound) {
+      reasons.push("Selector tidak menemukan element apa pun di halaman source.");
+      recommendations.push("Coba selector yang lebih spesifik ke row tabel, misalnya table.table-bordered tr atau #priceList table tbody tr.");
+    }
+    if (!checks.rowFound) {
+      reasons.push("Row tabel tidak ditemukan dari selector yang dipakai.");
+      recommendations.push("Pastikan selector mengarah ke tr, bukan container besar atau section teks.");
+    }
+    if (!checks.fieldMappingValid) {
+      reasons.push("Field mapping belum sesuai. Untuk Logam Mulia dibutuhkan td[0] berat, td[1] harga dasar, td[2] harga + Pajak PPh 0.25%.");
+      recommendations.push("Periksa mapping kolom: weightIndex=0, basePriceIndex=1, pricePph025Index=2.");
+    }
+    if (!checks.dataParsed) {
+      reasons.push("Data harga belum berhasil diparse dari row yang ditemukan.");
+      recommendations.push("Pastikan row berada di section yang benar: Emas Batangan, Perak Murni, atau Perak Heritage.");
+    }
+
+    const ok =
+      checks.urlAccessible &&
+      checks.selectorFound &&
+      checks.rowFound &&
+      checks.fieldMappingValid &&
+      checks.dataParsed;
+
+    return {
+      ok,
+      status: ok ? ("VALID" as const) : ("INVALID" as const),
+      selector,
+      checkedAt,
+      checks,
+      reasons,
+      recommendations,
+      debug: {
+        selector,
+        elementCount,
+        rowCount,
+        validDataCount,
+        sampleHtml,
+        sampleParsedRow,
+        checkedAt
+      },
+      rows: rows.slice(0, 40)
+    };
+  } catch (error) {
+    reasons.push(error instanceof Error ? error.message : "Validasi source gagal karena kesalahan sistem.");
+    recommendations.push("Ulangi preview scrape dan cek apakah URL/selector masih sesuai struktur website.");
+    return invalidResult();
   }
 }
 
