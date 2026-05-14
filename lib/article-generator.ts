@@ -1,271 +1,402 @@
-import { getRuntimeArticleTemplate } from "./admin-storage";
-import { chooseTemplateProfile } from "./editorial-templates";
-import type { ArticleTemplateRecord, DashboardNotification, GeneratedArticle, GoldPriceRow, GoldPriceSnapshot, Portal } from "./types";
+import type { DashboardNotification, GenerateArticleResponse, GeneratedArticle, GoldPriceRow, GoldPriceSnapshot, Portal } from "./types";
 
-function portalDateline(portal: Portal) {
-  return portal === "Beritasatu" ? "Jakarta, Beritasatu.com" : "JAKARTA, investor.id";
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const DEFAULT_OPENAI_MODEL = "gpt-4.1";
+const MAX_ROWS_PER_SOURCE = 80;
+
+type JsonPrimitive = string | number | boolean | null;
+type JsonRecord = Record<string, JsonPrimitive | JsonPrimitive[] | Record<string, JsonPrimitive>>;
+
+interface NormalizedSourceData {
+  source_name: string;
+  source_url: string;
+  status: GoldPriceSnapshot["status"];
+  jenis_emas: string;
+  run_time: string;
+  update_time: string | null;
+  tanggal_snapshot: string;
+  detected_shape: string[];
+  row_count: number;
+  rows: JsonRecord[];
 }
 
-function todayLabel() {
-  return new Intl.DateTimeFormat("id-ID", {
-    timeZone: "Asia/Jakarta",
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric"
-  }).format(new Date());
+interface ArticleGenerationContext {
+  portal: Portal;
+  portal_tone: string;
+  content_label: string;
+  generated_for_timezone: "Asia/Jakarta";
+  partial_failure: boolean;
+  failed_sources: Array<Pick<GoldPriceSnapshot, "source_name" | "source_url" | "status" | "catatan">>;
+  source_data: NormalizedSourceData[];
+  editorial_rules: string[];
 }
 
-function movementFromDelta(delta?: string | null) {
-  if (!delta) return "stabil";
-  if (delta.startsWith("+")) return "naik";
-  if (delta.startsWith("-")) return "turun";
-  return "stabil";
-}
-
-function strongestMovement(snapshots: GoldPriceSnapshot[]) {
-  const withDelta = snapshots.find((snapshot) => snapshot.delta);
-  return movementFromDelta(withDelta?.delta);
-}
-
-function movementWordForHeadline(portal: Portal, movement: string) {
-  if (portal === "Beritasatu") {
-    if (movement === "naik") return "Menguat";
-    if (movement === "turun") return "Turun";
-    return "Stabil";
-  }
-  if (movement === "naik") return "Melonjak";
-  if (movement === "turun") return "Tertekan";
-  return "Cermati Rinciannya";
-}
-
-function sourceNames(snapshots: GoldPriceSnapshot[]) {
-  return [...new Set(snapshots.map((snapshot) => snapshot.source_name))].join(", ");
-}
-
-function renderTemplateText(template: string, portal: Portal, jenisKonten: string, snapshots: GoldPriceSnapshot[]) {
-  const first = snapshots[0];
-  const date = todayLabel();
-  const movement = strongestMovement(snapshots);
-  const movementHeadline = movementWordForHeadline(portal, movement);
-  const replacements: Record<string, string> = {
-    portal,
-    dateline: portalDateline(portal),
-    jenis_konten: jenisKonten,
-    "jenis konten": jenisKonten,
-    tanggal: date,
-    "hari tanggal": date,
-    gerak: movementHeadline,
-    source: sourceNames(snapshots),
-    sources: sourceNames(snapshots),
-    harga_utama: first?.harga_terbaru ?? "-",
-    harga: first?.harga_terbaru ?? "-",
-    berat: first?.berat ?? "satuan utama",
-    delta: first?.delta ?? "belum tersedia",
-    buyback: first?.buyback ?? "-"
+interface OpenAIResponsePayload {
+  output_text?: string;
+  output?: Array<{
+    content?: Array<{
+      type?: string;
+      text?: string;
+    }>;
+  }>;
+  error?: {
+    message?: string;
+    type?: string;
+    code?: string;
   };
-
-  return Object.entries(replacements).reduce((result, [key, value]) => {
-    const bracePattern = new RegExp(`\\{${key}\\}`, "gi");
-    const bracketPattern = new RegExp(`\\[${key}\\]`, "gi");
-    return result.replace(bracePattern, value).replace(bracketPattern, value);
-  }, template);
+  incomplete_details?: {
+    reason?: string;
+  };
 }
 
-function allRows(snapshots: GoldPriceSnapshot[]) {
-  return snapshots.flatMap((snapshot) => snapshot.price_rows);
+const articleResponseSchema = {
+  type: "object",
+  properties: {
+    headline: { type: "string" },
+    lead: { type: "string" },
+    body: {
+      type: "array",
+      items: { type: "string" }
+    },
+    sourceLinks: {
+      type: "array",
+      items: { type: "string" }
+    },
+    disclaimer: { type: "string" }
+  },
+  required: ["headline", "lead", "body", "sourceLinks", "disclaimer"],
+  additionalProperties: false
+} as const;
+
+function notification(kind: DashboardNotification["kind"], title: string, message: string): DashboardNotification {
+  return {
+    id: crypto.randomUUID(),
+    kind,
+    title,
+    message
+  };
 }
 
-function rowsBySource(snapshots: GoldPriceSnapshot[]) {
-  return snapshots.map((snapshot) => ({
-    snapshot,
-    rows: snapshot.price_rows.filter((row) => row.harga || row.buyback)
-  }));
-}
-
-function formatRow(row: GoldPriceRow, includeSource = false) {
-  const sourcePrefix = includeSource ? `${row.source_name} - ` : "";
-  const delta = row.delta ? ` (${row.delta}${row.percentage_change ? ` / ${row.percentage_change}` : ""})` : "";
-  const category = row.category ? `${row.category} - ` : "";
-  return `- ${sourcePrefix}${category}${row.berat}: ${row.harga ?? "-"}${delta}`;
-}
-
-function priceBlockTitle(jenisKonten: string, sourceName: string) {
-  if (jenisKonten.toLowerCase().includes("perhiasan")) return `Harga emas perhiasan ${sourceName} hari ini:`;
-  if (jenisKonten.toLowerCase().includes("digital")) return `Harga emas digital ${sourceName} hari ini:`;
-  if (jenisKonten.toLowerCase().includes("dunia")) return `Harga emas dunia dari ${sourceName}:`;
-  if (jenisKonten.toLowerCase().includes("perak")) return `Harga perak ${sourceName} hari ini:`;
-  return `Harga emas ${sourceName} hari ini:`;
-}
-
-function priceBlocks(snapshots: GoldPriceSnapshot[]) {
-  return rowsBySource(snapshots)
-    .filter((group) => group.rows.length)
-    .map(({ snapshot, rows }) => {
-      const seenWeights = new Set<string>();
-      const selectedRows = rows
-        .filter((row) => {
-          const key = row.berat.toLowerCase();
-          if (seenWeights.has(key)) return false;
-          seenWeights.add(key);
-          return true;
-        })
-        .slice(0, 14);
-      return `${priceBlockTitle(snapshot.jenis_konten, snapshot.source_name)}\n${selectedRows.map((row) => formatRow(row)).join("\n")}`;
-    });
-}
-
-function comparisonSentence(snapshots: GoldPriceSnapshot[]) {
-  const compared = allRows(snapshots).filter((row) => row.delta);
-  if (!compared.length) {
-    return "Perbandingan dengan harga kemarin akan semakin lengkap setelah histori snapshot harian tersedia di database.";
-  }
-
-  const samples = compared.slice(0, 3).map((row) => `${row.source_name} ${row.berat} ${row.delta}`);
-  return `Dibandingkan data sebelumnya, pergerakan yang tercatat antara lain ${samples.join(", ")}.`;
-}
-
-function marketContext(jenisKonten: string, portal: Portal) {
-  const lower = jenisKonten.toLowerCase();
-  if (lower.includes("dunia")) {
-    return portal === "Beritasatu"
-      ? "Pergerakan emas dunia ikut dipengaruhi arah dolar AS, imbal hasil obligasi, dan sentimen geopolitik yang mengubah minat investor terhadap aset aman."
-      : "Dari sisi pasar global, pelaku pasar masih mencermati arah dolar AS, ekspektasi suku bunga bank sentral, imbal hasil obligasi pemerintah AS, dan tensi geopolitik yang menentukan permintaan aset safe haven.";
-  }
-  if (lower.includes("perhiasan")) {
-    return "Harga emas perhiasan dipengaruhi kadar karat, biaya produksi, permintaan ritel, serta selisih harga beli dan jual di masing-masing penyedia.";
-  }
-  if (lower.includes("digital")) {
-    return "Untuk emas digital, editor perlu mencermati spread harga beli dan buyback karena selisih antarplatform dapat memengaruhi keputusan transaksi pengguna.";
-  }
-  if (lower.includes("kecil")) {
-    return "Emas pecahan kecil tetap relevan bagi investor ritel karena modal awal lebih rendah dan likuiditas penjualan kembali lebih fleksibel.";
-  }
-  return "Pergerakan harga domestik tetap dipengaruhi harga emas global, kurs rupiah, biaya distribusi, dan kebijakan harga masing-masing penyedia.";
-}
-
-function headlineFor(portal: Portal, jenisKonten: string, snapshots: GoldPriceSnapshot[], template: ArticleTemplateRecord | null) {
-  const profile = chooseTemplateProfile(portal);
-  const date = todayLabel();
-  const movement = movementWordForHeadline(portal, strongestMovement(snapshots));
-  const lower = jenisKonten.toLowerCase();
-
-  if (template?.headline_template) {
-    const headlinePattern = template.headline_template
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find(Boolean);
-    const rendered = renderTemplateText(headlinePattern ?? template.headline_template, portal, jenisKonten, snapshots);
-    if (rendered.trim()) return rendered.trim();
-  }
-
+function portalTone(portal: Portal) {
   if (portal === "Beritasatu") {
-    if (lower.includes("perak")) return `Harga Perak Antam Hari Ini ${date} ${movement}`;
-    if (lower.includes("dunia")) return `Harga Emas Dunia Hari Ini ${date} ${movement}`;
-    return `Harga Emas Antam Hari Ini ${date} ${movement}, Cek Rinciannya`;
+    return "Bahasa Indonesia newsroom style: cepat, lugas, langsung ke data utama, paragraf pendek, tidak bertele-tele.";
   }
 
-  if (lower.includes("antam") && !lower.includes("ubs") && profile.headlinePatterns.some((pattern) => pattern.includes("ANTM"))) {
-    return `Harga Emas Antam (ANTM) Hari Ini, ${date}: ${movement}`;
+  return "Bahasa Indonesia business-news style: lebih analitis, memberi konteks market secukupnya, tetap disiplin pada data dan tidak mengarang angka.";
+}
+
+function compactText(value: string | null | undefined) {
+  if (!value) return null;
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  return trimmed || null;
+}
+
+function isPriceLikeRow(row: GoldPriceRow) {
+  return Boolean(
+    compactText(row.harga) ||
+      compactText(row.buyback) ||
+      row.base_price !== null ||
+      row.base_price !== undefined ||
+      row.price_pph_025 !== null ||
+      row.price_pph_025 !== undefined
+  );
+}
+
+function isUsableSnapshot(snapshot: GoldPriceSnapshot) {
+  if (snapshot.status !== "success") return false;
+
+  return Boolean(
+    compactText(snapshot.harga_terbaru) ||
+      compactText(snapshot.harga_kemarin) ||
+      compactText(snapshot.delta) ||
+      compactText(snapshot.percentage_change) ||
+      snapshot.price_rows.some(isPriceLikeRow)
+  );
+}
+
+function putIfPresent(target: JsonRecord, key: string, value: JsonPrimitive | undefined) {
+  if (value === undefined || value === null) return;
+  if (typeof value === "string") {
+    const cleaned = compactText(value);
+    if (cleaned) target[key] = cleaned;
+    return;
   }
-  if (lower.includes("perhiasan")) return `Harga Emas Perhiasan Hari Ini, ${date}, Cek Rinciannya`;
-  if (lower.includes("digital")) return `Harga Emas Digital Hari Ini, ${date}: ${movement}`;
-  if (lower.includes("kecil")) return `Harga Emas Hari Ini, ${date}, di ${sourceNames(snapshots)}`;
-  return `${jenisKonten} Hari Ini, ${date}: ${movement}`;
+  target[key] = value;
 }
 
-function beritasatuBody(jenisKonten: string, snapshots: GoldPriceSnapshot[], partialFailure: boolean, openingOverride?: string) {
-  const first = snapshots[0];
-  const body: string[] = [];
-  body.push(
-    openingOverride ||
-      `${portalDateline("Beritasatu")} - ${jenisKonten} pada ${todayLabel()} ${strongestMovement(snapshots)} berdasarkan pembaruan data terbaru dari ${sourceNames(snapshots)}. Harga utama yang terpantau dari ${first.source_name} berada di ${first.harga_terbaru ?? "-"}.`
-  );
-  body.push(comparisonSentence(snapshots));
-  body.push(...priceBlocks(snapshots));
-  body.push(marketContext(jenisKonten, "Beritasatu"));
+function normalizeRow(row: GoldPriceRow): JsonRecord {
+  const normalized: JsonRecord = {};
 
-  if (jenisKonten.toLowerCase().includes("antam") || first.source_name === "Logam Mulia") {
-    body.push(
-      "Untuk transaksi emas batangan, ketentuan pajak tetap mengikuti aturan yang berlaku. Editor dapat menambahkan detail PPh 22 jika artikel akan dipublikasikan sebagai update harga Antam."
-    );
+  putIfPresent(normalized, "product_type", row.product_type);
+  putIfPresent(normalized, "category", row.category ?? row.section_name);
+  putIfPresent(normalized, "weight", row.weight ?? row.berat);
+  putIfPresent(normalized, "price_display", row.harga);
+  putIfPresent(normalized, "base_price", row.base_price);
+  putIfPresent(normalized, "price_pph_025", row.price_pph_025);
+  putIfPresent(normalized, "buyback", row.buyback);
+  putIfPresent(normalized, "delta", row.delta);
+  putIfPresent(normalized, "percentage_change", row.percentage_change);
+  putIfPresent(normalized, "waktu_update", row.waktu_update);
+  putIfPresent(normalized, "tanggal_update", row.tanggal_update);
+  putIfPresent(normalized, "previous_snapshot_date", row.previous_snapshot_date);
+  putIfPresent(normalized, "previous_snapshot_run_time", row.previous_snapshot_run_time);
+
+  return normalized;
+}
+
+function snapshotSummaryRow(snapshot: GoldPriceSnapshot): JsonRecord {
+  const summary: JsonRecord = {};
+  putIfPresent(summary, "metric", "snapshot_summary");
+  putIfPresent(summary, "jenis_emas", snapshot.jenis_emas);
+  putIfPresent(summary, "weight", snapshot.berat);
+  putIfPresent(summary, "latest_price", snapshot.harga_terbaru);
+  putIfPresent(summary, "previous_price", snapshot.harga_kemarin);
+  putIfPresent(summary, "buyback", snapshot.buyback);
+  putIfPresent(summary, "delta", snapshot.delta);
+  putIfPresent(summary, "percentage_change", snapshot.percentage_change);
+  putIfPresent(summary, "update_time", snapshot.update_time);
+  return summary;
+}
+
+function inferShape(rows: JsonRecord[]) {
+  const keys = new Set<string>();
+  for (const row of rows) {
+    for (const [key, value] of Object.entries(row)) {
+      if (value !== null && value !== "") keys.add(key);
+    }
+  }
+  return Array.from(keys);
+}
+
+function normalizeSourceData(snapshots: GoldPriceSnapshot[]): NormalizedSourceData[] {
+  return snapshots.map((snapshot) => {
+    const sourceRows = snapshot.price_rows.filter(isPriceLikeRow).map(normalizeRow);
+    const rows = sourceRows.length > 0 ? sourceRows : [snapshotSummaryRow(snapshot)];
+    const limitedRows = rows.slice(0, MAX_ROWS_PER_SOURCE);
+
+    return {
+      source_name: snapshot.source_name,
+      source_url: snapshot.source_url,
+      status: snapshot.status,
+      jenis_emas: snapshot.jenis_emas,
+      run_time: snapshot.run_time,
+      update_time: snapshot.update_time,
+      tanggal_snapshot: snapshot.tanggal_snapshot,
+      detected_shape: inferShape(limitedRows),
+      row_count: rows.length,
+      rows: limitedRows
+    };
+  });
+}
+
+function buildContext(portal: Portal, jenisKonten: string, usableSnapshots: GoldPriceSnapshot[], allSnapshots: GoldPriceSnapshot[]): ArticleGenerationContext {
+  const failedSources = allSnapshots
+    .filter((snapshot) => snapshot.status !== "success")
+    .map((snapshot) => ({
+      source_name: snapshot.source_name,
+      source_url: snapshot.source_url,
+      status: snapshot.status,
+      catatan: snapshot.catatan
+    }));
+
+  return {
+    portal,
+    portal_tone: portalTone(portal),
+    content_label: jenisKonten,
+    generated_for_timezone: "Asia/Jakarta",
+    partial_failure: failedSources.length > 0,
+    failed_sources: failedSources,
+    source_data: normalizeSourceData(usableSnapshots),
+    editorial_rules: [
+      "Gunakan source_data dan bentuk datanya sebagai konteks utama artikel.",
+      "Portal hanya menentukan tone dan writing style; jangan pakai portal untuk memilih template statis.",
+      "content_label hanya metadata redaksi; jangan gunakan sebagai routing template hardcoded.",
+      "Jangan mengarang angka, harga, timestamp, sumber, atau perbandingan yang tidak ada di data.",
+      "Jika data menyediakan delta atau previous snapshot, jelaskan perbandingan secara transparan.",
+      "Jika beberapa source berhasil dan sebagian gagal, artikel tetap dibuat berdasarkan data yang tersedia dan disclaimer harus menyebut sebagian source gagal.",
+      "Tulis headline yang natural untuk portal, lead yang kuat, dan body 4 sampai 7 paragraf ringkas.",
+      "Jika data berbentuk tabel harga per berat/kadar, tampilkan rincian penting dalam body dengan bullet list pendek.",
+      "Market insight boleh ditambahkan singkat, umum, dan tidak boleh menyebut data eksternal spesifik yang tidak tersedia."
+    ]
+  };
+}
+
+function developerPrompt() {
+  return [
+    "Kamu adalah engine penulisan artikel redaksi ekonomi untuk dashboard harga emas dan perak.",
+    "Tugasmu membuat draft artikel Bahasa Indonesia dari normalized source data yang diberikan sistem.",
+    "Jangan memakai template picker manual, jangan memakai routing template hardcoded, dan jangan meniru histori artikel secara bebas.",
+    "Pahami nama source, schema field, row data, delta, timestamp, dan status data. Bentuk data source menentukan struktur artikel.",
+    "Portal hanya menentukan tone: Beritasatu lebih straight-news dan ringkas; Investor Daily lebih bisnis dan analitis.",
+    "Output wajib JSON valid sesuai schema. Jangan tambahkan markdown fence atau teks di luar JSON."
+  ].join("\n");
+}
+
+function userPrompt(context: ArticleGenerationContext) {
+  return [
+    "Buat draft artikel dari konteks JSON berikut.",
+    "Pastikan semua angka artikel berasal dari source_data.",
+    "Jika sourceLinks berisi link, hanya gunakan URL yang ada di source_data.",
+    "Konteks:",
+    JSON.stringify(context, null, 2)
+  ].join("\n");
+}
+
+function extractOutputText(payload: OpenAIResponsePayload) {
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) {
+    return payload.output_text;
   }
 
-  if (partialFailure) body.push("Sebagian source tidak berhasil dimuat. Artikel dibuat berdasarkan data yang tersedia.");
-  body.push("Data ini menjadi snapshot awal untuk pembanding harga pada pembaruan berikutnya.");
-  return body;
+  for (const item of payload.output ?? []) {
+    for (const content of item.content ?? []) {
+      if ((content.type === "output_text" || content.type === "text") && typeof content.text === "string" && content.text.trim()) {
+        return content.text;
+      }
+    }
+  }
+
+  return null;
 }
 
-function investorDailyBody(jenisKonten: string, snapshots: GoldPriceSnapshot[], partialFailure: boolean, openingOverride?: string) {
-  const first = snapshots[0];
-  const body: string[] = [];
-  body.push(
-    openingOverride ||
-      `${portalDateline("Investor Daily")} - ${jenisKonten} kembali menjadi perhatian investor pada ${todayLabel()}. Data terbaru dari ${sourceNames(snapshots)} menunjukkan harga utama berada di ${first.harga_terbaru ?? "-"} untuk ${first.berat ?? "satuan utama"}.`
+function isGeneratedArticle(value: unknown): value is GeneratedArticle & { disclaimer: string } {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<GeneratedArticle>;
+  return (
+    typeof candidate.headline === "string" &&
+    typeof candidate.lead === "string" &&
+    Array.isArray(candidate.body) &&
+    candidate.body.every((paragraph) => typeof paragraph === "string") &&
+    Array.isArray(candidate.sourceLinks) &&
+    candidate.sourceLinks.every((link) => typeof link === "string") &&
+    typeof candidate.disclaimer === "string"
   );
-  body.push(
-    `${comparisonSentence(snapshots)} Informasi ini penting karena perubahan harga harian dapat memengaruhi keputusan beli, jual, maupun strategi akumulasi emas secara bertahap.`
-  );
-  body.push(marketContext(jenisKonten, "Investor Daily"));
-  body.push(...priceBlocks(snapshots));
-  body.push("Bagi investor ritel, daftar harga per berat membantu menghitung kebutuhan modal secara lebih presisi sebelum mengambil keputusan transaksi.");
-
-  if (partialFailure) body.push("Sebagian source tidak berhasil dimuat. Artikel dibuat berdasarkan data yang tersedia.");
-  body.push(
-    "Ke depan, editor dapat memperkaya artikel dengan tren 7 hari terakhir, perbandingan antarplatform, serta sentimen pasar global agar pembaca mendapat konteks yang lebih utuh."
-  );
-  return body;
 }
 
-export async function generateArticle(
-  portal: Portal,
-  jenisKonten: string,
-  snapshots: GoldPriceSnapshot[]
-): Promise<{ ok: boolean; article?: GeneratedArticle; notifications: DashboardNotification[] }> {
-  const usable = snapshots.filter((snapshot) => snapshot.status === "success" && snapshot.price_rows.some((row) => row.harga || row.buyback));
-  const partialFailure = snapshots.some((snapshot) => snapshot.status !== "success");
-  if (!usable.length) {
+function sanitizeArticle(article: GeneratedArticle & { disclaimer: string }, context: ArticleGenerationContext): GeneratedArticle {
+  const allowedLinks = new Set(context.source_data.map((source) => source.source_url));
+  const sourceLinks = article.sourceLinks.filter((link) => allowedLinks.has(link));
+  const fallbackLinks = context.source_data.map((source) => source.source_url);
+  const body = article.body.map((paragraph) => paragraph.trim()).filter(Boolean);
+  const disclaimer =
+    article.disclaimer.trim() ||
+    (context.partial_failure ? "Sebagian source tidak berhasil dimuat. Artikel dibuat berdasarkan data yang tersedia." : undefined);
+
+  return {
+    headline: article.headline.trim(),
+    lead: article.lead.trim(),
+    body,
+    sourceLinks: sourceLinks.length > 0 ? sourceLinks : fallbackLinks,
+    disclaimer
+  };
+}
+
+async function callOpenAI(context: ArticleGenerationContext): Promise<GeneratedArticle> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY belum tersedia di environment server.");
+  }
+
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL,
+      input: [
+        {
+          role: "developer",
+          content: developerPrompt()
+        },
+        {
+          role: "user",
+          content: userPrompt(context)
+        }
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "editorial_gold_article",
+          schema: articleResponseSchema,
+          strict: true
+        }
+      },
+      max_output_tokens: 2400,
+      store: false
+    })
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as OpenAIResponsePayload;
+  if (!response.ok) {
+    const message = payload.error?.message ?? `OpenAI API mengembalikan HTTP ${response.status}.`;
+    throw new Error(message);
+  }
+
+  if (payload.error?.message) {
+    throw new Error(payload.error.message);
+  }
+
+  if (payload.incomplete_details?.reason) {
+    throw new Error(`Respons AI tidak lengkap: ${payload.incomplete_details.reason}.`);
+  }
+
+  const outputText = extractOutputText(payload);
+  if (!outputText) {
+    throw new Error("Respons AI kosong atau tidak berisi output_text.");
+  }
+
+  const parsed = JSON.parse(outputText) as unknown;
+  if (!isGeneratedArticle(parsed)) {
+    throw new Error("Respons AI tidak sesuai format draft artikel.");
+  }
+
+  return sanitizeArticle(parsed, context);
+}
+
+export async function generateArticle(portal: Portal, jenisKonten: string, snapshots: GoldPriceSnapshot[]): Promise<GenerateArticleResponse> {
+  const usableSnapshots = snapshots.filter(isUsableSnapshot);
+
+  if (!portal || !jenisKonten || usableSnapshots.length === 0) {
     return {
       ok: false,
       notifications: [
-        {
-          id: crypto.randomUUID(),
-          kind: "warning",
-          title: "Generate artikel diblokir",
-          message: "Generate artikel tidak dapat dilakukan karena data source belum berhasil dimuat."
-        }
+        notification(
+          "warning",
+          "Generate artikel belum siap",
+          "Generate artikel tidak dapat dilakukan karena data source belum berhasil dimuat."
+        )
       ]
     };
   }
 
-  const runtimeTemplate = await getRuntimeArticleTemplate(portal, jenisKonten);
-  const openingOverride = runtimeTemplate?.body_template
-    ? renderTemplateText(runtimeTemplate.body_template, portal, jenisKonten, usable)
-    : undefined;
-  const body =
-    portal === "Beritasatu"
-      ? beritasatuBody(jenisKonten, usable, partialFailure, openingOverride)
-      : investorDailyBody(jenisKonten, usable, partialFailure, openingOverride);
+  const context = buildContext(portal, jenisKonten, usableSnapshots, snapshots);
 
-  return {
-    ok: true,
-    article: {
-      headline: headlineFor(portal, jenisKonten, usable, runtimeTemplate),
-      lead:
-        portal === "Beritasatu"
-          ? `${portalDateline(portal)} - ${jenisKonten} terpantau ${strongestMovement(usable)} berdasarkan pembaruan data ${sourceNames(usable)}.`
-          : `${portalDateline(portal)} - ${jenisKonten} menjadi perhatian pasar setelah data ${sourceNames(usable)} menunjukkan pergerakan terbaru harga emas.`,
-      body,
-      sourceLinks: [...new Set(usable.map((snapshot) => snapshot.source_url))],
-      disclaimer: partialFailure ? "Sebagian source tidak berhasil dimuat. Artikel dibuat berdasarkan data yang tersedia." : undefined
-    },
-    notifications: [
-      {
-        id: crypto.randomUUID(),
-        kind: "success",
-        title: "Artikel berhasil dibuat",
-        message: "Draft artikel otomatis siap direview editor."
-      }
-    ]
-  };
+  try {
+    const article = await callOpenAI(context);
+    return {
+      ok: true,
+      article,
+      notifications: [
+        notification(
+          context.partial_failure ? "warning" : "success",
+          context.partial_failure ? "Artikel AI dibuat dengan data terbatas" : "Artikel AI berhasil dibuat",
+          context.partial_failure
+            ? "Sebagian source gagal dimuat. Draft dibuat oleh OpenAI berdasarkan source yang berhasil."
+            : "Draft artikel dibuat oleh OpenAI berdasarkan snapshot data terbaru."
+        )
+      ]
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      notifications: [
+        notification(
+          "error",
+          "Generate artikel AI gagal",
+          error instanceof Error ? error.message : "OpenAI API tidak berhasil membuat artikel."
+        )
+      ]
+    };
+  }
 }

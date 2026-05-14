@@ -52,7 +52,7 @@ const snapshotSchema = z.object({
 
 const schema = z.object({
   portal: z.enum(["Beritasatu", "Investor Daily"]),
-  jenisKonten: z.string().min(1),
+  jenisKonten: z.string().optional().default("Artikel Harga Emas/Perak"),
   snapshots: z.array(snapshotSchema),
   triggeredBy: z.string().optional(),
   assignedEditor: z.string().optional()
@@ -71,7 +71,7 @@ export async function POST(request: Request) {
             id: crypto.randomUUID(),
             kind: "warning",
             title: "Generate artikel belum siap",
-            message: "Run Artikel hanya aktif jika data sudah berhasil di-run, portal dipilih, dan jenis konten dipilih."
+            message: "Run Artikel hanya aktif jika data source sudah berhasil dimuat dan portal dipilih."
           }
         ]
       },
