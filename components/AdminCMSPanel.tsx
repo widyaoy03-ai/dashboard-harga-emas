@@ -51,6 +51,15 @@ type SourcePreviewResponse = {
     rowsFound: number;
     validRows: number;
     rows: GoldPriceRow[];
+    debug?: {
+      parser?: string;
+      sectionsFound?: string[];
+      ignoredSections?: string[];
+      validRows?: number;
+      skippedRows?: number;
+      skippedSamples?: Array<{ section: string | null; reason: string; sample: string }>;
+      stoppedAtSection?: string | null;
+    };
     message: string;
   };
 };
@@ -102,6 +111,11 @@ type SourceDocumentValidationResponse = {
       validDataCount: number;
       sampleHtml: string;
       sampleParsedRow: GoldPriceRow | null;
+      sectionsFound?: string[];
+      ignoredSections?: string[];
+      skippedRows?: number;
+      skippedSamples?: Array<{ section: string | null; reason: string; sample: string }>;
+      stoppedAtSection?: string | null;
       checkedAt: string;
     };
     rows: GoldPriceRow[];
@@ -717,8 +731,20 @@ export function AdminCMSPanel() {
                           <dd className="font-semibold text-textPrimary">{sourceDocumentAudit.validation.debug.elementCount}</dd>
                         </div>
                         <div className="flex justify-between gap-3">
+                          <dt>Section ditemukan</dt>
+                          <dd className="text-right font-semibold text-textPrimary">{sourceDocumentAudit.validation.debug.sectionsFound?.join(", ") || "-"}</dd>
+                        </div>
+                        <div className="flex justify-between gap-3">
+                          <dt>Section diabaikan</dt>
+                          <dd className="text-right font-semibold text-textPrimary">{sourceDocumentAudit.validation.debug.ignoredSections?.join(", ") || "-"}</dd>
+                        </div>
+                        <div className="flex justify-between gap-3">
                           <dt>Row ditemukan</dt>
                           <dd className="font-semibold text-textPrimary">{sourceDocumentAudit.validation.debug.rowCount}</dd>
+                        </div>
+                        <div className="flex justify-between gap-3">
+                          <dt>Row di-skip</dt>
+                          <dd className="font-semibold text-textPrimary">{sourceDocumentAudit.validation.debug.skippedRows ?? 0}</dd>
                         </div>
                         <div className="flex justify-between gap-3">
                           <dt>Sample parsed row</dt>
@@ -950,6 +976,22 @@ export function AdminCMSPanel() {
                   </div>
                   <p className="mt-1 text-xs text-textSecondary">Selector: {sourcePreview.selector || "-"}</p>
                   <p className="mt-1 text-xs text-textSecondary">Row ditemukan: {sourcePreview.rowsFound} | Preview: {new Date(sourcePreview.previewedAt).toLocaleString("id-ID")}</p>
+                  {sourcePreview.debug && (
+                    <div className="mt-3 grid gap-2 rounded-lg border border-border bg-background p-3 text-xs text-textSecondary">
+                      <p className="font-bold text-textPrimary">Debug Logam Mulia</p>
+                      <p>Section ditemukan: {sourcePreview.debug.sectionsFound?.join(", ") || "-"}</p>
+                      <p>Section diabaikan: {sourcePreview.debug.ignoredSections?.join(", ") || "-"}</p>
+                      <p>Row valid: {sourcePreview.debug.validRows ?? sourcePreview.validRows} | Row di-skip: {sourcePreview.debug.skippedRows ?? 0}</p>
+                      <p>Stop di section: {sourcePreview.debug.stoppedAtSection ?? "-"}</p>
+                      {!!sourcePreview.debug.skippedSamples?.length && (
+                        <div className="max-h-28 overflow-auto rounded-md bg-surface p-2">
+                          {sourcePreview.debug.skippedSamples.slice(0, 4).map((item, index) => (
+                            <p key={`${item.reason}-${index}`}>{item.reason}: {item.sample || "-"}</p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="mt-3 max-h-56 overflow-auto rounded-lg border border-border">
                     <table className="w-full min-w-[720px] border-collapse text-xs">
                       <thead>

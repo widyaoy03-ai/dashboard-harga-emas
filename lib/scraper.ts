@@ -322,18 +322,23 @@ function tableRowSelectionsFromHtml(html: string, selector?: string) {
     .filter((row) => row.cells.length);
 }
 
-const logamMuliaProductSections = ["Emas Batangan", "Perak Murni", "Perak Heritage"] as const;
+const logamMuliaProductSections = ["Emas Batangan", "Perak Murni"] as const;
 type LogamMuliaProductSection = (typeof logamMuliaProductSections)[number];
 
-const logamMuliaSectionSlugs: Record<LogamMuliaProductSection, "emas_batangan" | "perak_murni" | "perak_heritage"> = {
+const logamMuliaSectionSlugs: Record<LogamMuliaProductSection, "emas_batangan" | "perak_murni"> = {
   "Emas Batangan": "emas_batangan",
-  "Perak Murni": "perak_murni",
-  "Perak Heritage": "perak_heritage"
+  "Perak Murni": "perak_murni"
+};
+
+type LogamMuliaSkippedRow = {
+  section: string | null;
+  reason: string;
+  sample: string;
 };
 
 function isLogamMuliaProductSection(value: string): value is LogamMuliaProductSection {
   const normalized = value.replace(/\s+/g, " ").trim().toLowerCase();
-  return logamMuliaProductSections.some((section) => normalized.includes(section.toLowerCase()));
+  return logamMuliaProductSections.some((section) => normalized === section.toLowerCase());
 }
 
 function sectionTitleFromRow(row: ReturnType<typeof queryHtmlSelections>[number]) {
@@ -349,9 +354,9 @@ function sectionTitleFromRow(row: ReturnType<typeof queryHtmlSelections>[number]
   return title;
 }
 
-function matchTargetSection(sectionTitle: string, targetSections: string[]) {
+function matchTargetSection(sectionTitle: string, targetSections: readonly string[]) {
   const normalized = sectionTitle.replace(/\s+/g, " ").trim().toLowerCase();
-  return targetSections.find((section) => normalized.includes(section.toLowerCase())) ?? null;
+  return targetSections.find((section) => normalized === section.toLowerCase()) ?? null;
 }
 
 function extractLogamMuliaSectionRows(
@@ -367,6 +372,20 @@ function extractLogamMuliaSectionRows(
   let stoppedAtSection: string | null = null;
   let inspectedRows = 0;
   let invalidRowsSkipped = 0;
+  const foundSections: string[] = [];
+  const ignoredSections: string[] = [];
+  const skippedRows: LogamMuliaSkippedRow[] = [];
+
+  const trackSkipped = (reason: string, cells: string[]) => {
+    invalidRowsSkipped += 1;
+    if (skippedRows.length < 20) {
+      skippedRows.push({
+        section: capturing ? sectionName : null,
+        reason,
+        sample: cells.join(" | ").slice(0, 220)
+      });
+    }
+  };
 
   for (const rowSelection of tableRowSelectionsFromHtml(html, configuredRowSelector(source))) {
     inspectedRows += 1;
@@ -374,30 +393,35 @@ function extractLogamMuliaSectionRows(
     const sectionTitle = sectionTitleFromRow(rowSelection);
 
     if (sectionTitle) {
+      foundSections.push(sectionTitle);
       const matchedTarget = matchTargetSection(sectionTitle, [sectionName]);
       if (matchedTarget === sectionName) {
         capturing = true;
         targetSectionFound = true;
         continue;
       }
+      ignoredSections.push(sectionTitle);
       if (capturing) stoppedAtSection = sectionTitle;
       if (capturing) break;
       continue;
     }
 
     if (!capturing) continue;
-    if (!/<td\b/i.test(rowSelection.html)) continue;
+    if (!/<td\b/i.test(rowSelection.html)) {
+      trackSkipped("row bukan data td", cells);
+      continue;
+    }
     if (cells.length < 3) {
       stoppedAtSection = "struktur row berubah";
-      invalidRowsSkipped += 1;
+      trackSkipped("kolom kurang dari 3", cells);
       continue;
     }
     if (!looksLikeWeight(cells[0] ?? "")) {
-      invalidRowsSkipped += 1;
+      trackSkipped("kolom berat tidak valid", cells);
       continue;
     }
     if (priceNumber(cells[1] ?? "", source.priceCurrency) === null || priceNumber(cells[2] ?? "", source.priceCurrency) === null) {
-      invalidRowsSkipped += 1;
+      trackSkipped("harga dasar atau harga pajak tidak numerik", cells);
       continue;
     }
 
@@ -410,12 +434,15 @@ function extractLogamMuliaSectionRows(
     targetSectionFound,
     stoppedAtSection,
     inspectedRows,
-    invalidRowsSkipped
+    invalidRowsSkipped,
+    foundSections: [...new Set(foundSections)],
+    ignoredSections: [...new Set(ignoredSections)],
+    skippedRows
   };
 }
 
 function targetLogamMuliaSectionsForContent(jenisKonten: string): LogamMuliaProductSection[] {
-  if (jenisKonten.toLowerCase().includes("perak")) return ["Perak Murni", "Perak Heritage"];
+  if (jenisKonten.toLowerCase().includes("perak")) return ["Perak Murni"];
   return ["Emas Batangan"];
 }
 
@@ -428,6 +455,9 @@ function parseLogamMuliaSections(source: SourceConfig, jenisKonten: string, html
     stoppedAtSection: parsed.find((section) => section.stoppedAtSection)?.stoppedAtSection ?? null,
     inspectedRows: Math.max(...parsed.map((section) => section.inspectedRows), 0),
     invalidRowsSkipped: parsed.reduce((total, section) => total + section.invalidRowsSkipped, 0),
+    foundSections: [...new Set(parsed.flatMap((section) => section.foundSections))],
+    ignoredSections: [...new Set(parsed.flatMap((section) => section.ignoredSections))],
+    skippedRows: parsed.flatMap((section) => section.skippedRows).slice(0, 30),
     sections: Object.fromEntries(targetSections.map((sectionName, index) => [sectionName, parsed[index]]))
   };
 }
@@ -604,8 +634,7 @@ export async function scrapeLogamMuliaProducts(url = "https://www.logammulia.com
   const visibleText = stripTags(fetched.html);
   const products = {
     emas_batangan: [] as ReturnType<typeof logamMuliaOutputItem>[],
-    perak_murni: [] as ReturnType<typeof logamMuliaOutputItem>[],
-    perak_heritage: [] as ReturnType<typeof logamMuliaOutputItem>[]
+    perak_murni: [] as ReturnType<typeof logamMuliaOutputItem>[]
   };
   const debug: Record<string, { sectionFound: boolean; rowCount: number; inspectedRows: number; invalidRowsSkipped: number; stoppedAtSection: string | null }> = {};
 
@@ -787,6 +816,10 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
     const visibleText = stripTags(fetched.html);
     const candidateRows = selector ? tableRowsFromHtml(fetched.html, selector).length : tableRowsFromHtml(fetched.html).length;
     const rows = extractPriceRows(source, jenisKonten, fetched.html, visibleText);
+    const logamMuliaDebug =
+      source.parserType === "logam-mulia" || source.name === "Logam Mulia"
+        ? parseLogamMuliaSections(source, jenisKonten, fetched.html, visibleText)
+        : null;
 
     return {
       ok: rows.length > 0,
@@ -795,6 +828,17 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
       rowsFound: candidateRows,
       validRows: rows.length,
       rows: rows.slice(0, 20),
+      debug: logamMuliaDebug
+        ? {
+            parser: "logam-mulia-section-based",
+            sectionsFound: logamMuliaDebug.foundSections,
+            ignoredSections: logamMuliaDebug.ignoredSections,
+            validRows: logamMuliaDebug.rows.length,
+            skippedRows: logamMuliaDebug.invalidRowsSkipped,
+            skippedSamples: logamMuliaDebug.skippedRows,
+            stoppedAtSection: logamMuliaDebug.stoppedAtSection
+          }
+        : undefined,
       message: rows.length
         ? `Preview menemukan ${rows.length} data valid dari ${candidateRows} row.`
         : `Selector berhasil dijalankan, tetapi tidak ada data harga valid dari ${candidateRows} row.`
@@ -807,6 +851,7 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
       rowsFound: 0,
       validRows: 0,
       rows: [] as GoldPriceRow[],
+      debug: undefined,
       message: error instanceof Error ? `Preview gagal: ${error.message}` : "Preview gagal karena kesalahan sistem."
     };
   }
@@ -829,6 +874,7 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
   let validDataCount = 0;
   let sampleHtml = "";
   let sampleParsedRow: GoldPriceRow | null = null;
+  let logamMuliaDebug: ReturnType<typeof parseLogamMuliaSections> | null = null;
 
   const invalidResult = () => ({
     ok: false,
@@ -845,6 +891,11 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
       validDataCount,
       sampleHtml,
       sampleParsedRow,
+      sectionsFound: logamMuliaDebug?.foundSections ?? [],
+      ignoredSections: logamMuliaDebug?.ignoredSections ?? [],
+      skippedRows: logamMuliaDebug?.invalidRowsSkipped ?? 0,
+      skippedSamples: logamMuliaDebug?.skippedRows ?? [],
+      stoppedAtSection: logamMuliaDebug?.stoppedAtSection ?? null,
       checkedAt
     },
     rows: [] as GoldPriceRow[]
@@ -889,7 +940,12 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
 
     checks.rowFound = rowCount > 0;
 
-    const rows = extractPriceRows(source, jenisKonten, fetched.html, stripTags(fetched.html));
+    const visibleText = stripTags(fetched.html);
+    logamMuliaDebug =
+      source.parserType === "logam-mulia" || source.name === "Logam Mulia"
+        ? parseLogamMuliaSections(source, jenisKonten, fetched.html, visibleText)
+        : null;
+    const rows = logamMuliaDebug ? logamMuliaDebug.rows : extractPriceRows(source, jenisKonten, fetched.html, visibleText);
     validDataCount = rows.length;
     checks.dataParsed = validDataCount > 0;
     sampleParsedRow = rows[0] ?? null;
@@ -913,7 +969,7 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
     }
     if (!checks.dataParsed) {
       reasons.push("Data harga belum berhasil diparse dari row yang ditemukan.");
-      recommendations.push("Pastikan row berada di section yang benar: Emas Batangan, Perak Murni, atau Perak Heritage.");
+      recommendations.push("Pastikan row berada di section yang benar: Emas Batangan atau Perak Murni.");
     }
 
     const ok =
@@ -938,6 +994,11 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
         validDataCount,
         sampleHtml,
         sampleParsedRow,
+        sectionsFound: logamMuliaDebug?.foundSections ?? [],
+        ignoredSections: logamMuliaDebug?.ignoredSections ?? [],
+        skippedRows: logamMuliaDebug?.invalidRowsSkipped ?? 0,
+        skippedSamples: logamMuliaDebug?.skippedRows ?? [],
+        stoppedAtSection: logamMuliaDebug?.stoppedAtSection ?? null,
         checkedAt
       },
       rows: rows.slice(0, 40)

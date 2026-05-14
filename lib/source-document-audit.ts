@@ -16,9 +16,9 @@ function hasWord(text: string, word: string) {
 }
 
 function extractSections(text: string, fileName: string) {
-  const candidates = ["Emas Batangan", "Perak Murni", "Perak Heritage"];
+  const candidates = ["Emas Batangan", "Perak Murni"];
   const sections = candidates.filter((section) => text.toLowerCase().includes(section.toLowerCase()));
-  if (!sections.length && /perak/i.test(fileName)) return ["Perak Murni", "Perak Heritage"];
+  if (!sections.length && /perak/i.test(fileName)) return ["Perak Murni"];
   if (!sections.length) return ["Emas Batangan"];
   return sections;
 }
@@ -71,7 +71,9 @@ export function parseSourceDocumentText(text: string, fileName = "source.docx") 
     includeKeywords: [],
     excludeKeywords: [],
     boundaryStartKeywords: sections,
-    boundaryStopKeywords: isPerak ? ["Emas Batangan", "Gift Series"] : ["Gift Series", "Perak", "Perak Murni", "Perak Heritage", "Heritage"],
+    boundaryStopKeywords: isPerak
+      ? ["Emas Batangan", "Gift Series", "Perak Heritage", "Heritage"]
+      : ["Emas Batangan Gift Series", "Emas Batangan Selamat Idul Fitri", "Emas Batangan Imlek", "Emas Batangan Batik Seri III", "Perak", "Perak Murni", "Perak Heritage", "Heritage"],
     priceCurrency: "IDR",
     operationalNote: "Konfigurasi hasil ekstraksi dokumen source Logam Mulia."
   };
