@@ -51,6 +51,20 @@ type SourcePreviewResponse = {
     rowsFound: number;
     validRows: number;
     rows: GoldPriceRow[];
+    fetch?: {
+      ok: boolean;
+      status: number;
+      statusText?: string;
+      finalUrl: string;
+      htmlSize: number;
+      elapsedMs: number;
+      attempts: number;
+      contentType?: string | null;
+      blockedHint?: string | null;
+      errorName?: string | null;
+      errorMessage?: string | null;
+      sampleHtml?: string;
+    } | null;
     debug?: {
       parser?: string;
       sectionsFound?: string[];
@@ -111,6 +125,7 @@ type SourceDocumentValidationResponse = {
       validDataCount: number;
       sampleHtml: string;
       sampleParsedRow: GoldPriceRow | null;
+      fetch?: SourcePreviewResponse["preview"]["fetch"];
       sectionsFound?: string[];
       ignoredSections?: string[];
       skippedRows?: number;
@@ -727,6 +742,20 @@ export function AdminCMSPanel() {
                       <p className="text-sm font-bold text-textPrimary">Debug Info</p>
                       <dl className="mt-2 grid gap-1 text-xs text-textSecondary">
                         <div className="flex justify-between gap-3">
+                          <dt>HTTP</dt>
+                          <dd className="text-right font-semibold text-textPrimary">
+                            {sourceDocumentAudit.validation.debug.fetch
+                              ? `${sourceDocumentAudit.validation.debug.fetch.status || "-"} / ${sourceDocumentAudit.validation.debug.fetch.htmlSize} karakter`
+                              : "-"}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-3">
+                          <dt>Fetch time</dt>
+                          <dd className="text-right font-semibold text-textPrimary">
+                            {sourceDocumentAudit.validation.debug.fetch ? `${sourceDocumentAudit.validation.debug.fetch.elapsedMs} ms` : "-"}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-3">
                           <dt>Element ditemukan</dt>
                           <dd className="font-semibold text-textPrimary">{sourceDocumentAudit.validation.debug.elementCount}</dd>
                         </div>
@@ -976,6 +1005,16 @@ export function AdminCMSPanel() {
                   </div>
                   <p className="mt-1 text-xs text-textSecondary">Selector: {sourcePreview.selector || "-"}</p>
                   <p className="mt-1 text-xs text-textSecondary">Row ditemukan: {sourcePreview.rowsFound} | Preview: {new Date(sourcePreview.previewedAt).toLocaleString("id-ID")}</p>
+                  {sourcePreview.fetch && (
+                    <div className="mt-3 grid gap-1 rounded-lg border border-border bg-background p-3 text-xs text-textSecondary">
+                      <p className="font-bold text-textPrimary">Debug Fetch Backend</p>
+                      <p>Status: HTTP {sourcePreview.fetch.status || "-"} {sourcePreview.fetch.statusText ?? ""} | Size: {sourcePreview.fetch.htmlSize} karakter | {sourcePreview.fetch.elapsedMs} ms</p>
+                      <p>Final URL: {sourcePreview.fetch.finalUrl}</p>
+                      <p>Content-Type: {sourcePreview.fetch.contentType ?? "-"}</p>
+                      {sourcePreview.fetch.blockedHint && <p className="font-semibold text-amber-700">Blocked hint: {sourcePreview.fetch.blockedHint}</p>}
+                      {sourcePreview.fetch.errorMessage && <p className="font-semibold text-red-700">Error: {sourcePreview.fetch.errorName ?? "FetchError"} - {sourcePreview.fetch.errorMessage}</p>}
+                    </div>
+                  )}
                   {sourcePreview.debug && (
                     <div className="mt-3 grid gap-2 rounded-lg border border-border bg-background p-3 text-xs text-textSecondary">
                       <p className="font-bold text-textPrimary">Debug Logam Mulia</p>

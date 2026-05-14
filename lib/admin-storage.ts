@@ -119,8 +119,7 @@ function sourceRecordFromRow(row: Record<string, unknown>): AdminSourceRecord {
   const selectorConfig = (row.selector_config ?? {}) as Partial<ReturnType<typeof selectorConfigFromSource>>;
   const group = sourceGroups.includes(row.source_group as SourceConfig["group"]) ? (row.source_group as SourceConfig["group"]) : "manual";
   const contentMapping = Array.isArray(row.content_mapping) ? (row.content_mapping as SourceContentMapping[]) : [];
-
-  return {
+  const record: AdminSourceRecord = {
     id: String(row.id),
     name: String(row.source_name),
     url: String(row.source_url),
@@ -148,6 +147,29 @@ function sourceRecordFromRow(row: Record<string, unknown>): AdminSourceRecord {
     created_at: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ""),
     updated_at: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at ?? "")
   };
+
+  if (/^logam\s*mulia$/i.test(record.name)) {
+    return {
+      ...record,
+      parserType: "logam-mulia",
+      dataSelector: "table.table-bordered",
+      rowSelector: "table.table-bordered tr",
+      fieldMapping: {
+        ...(record.fieldMapping ?? {}),
+        weightIndex: 0,
+        priceIndex: 1,
+        basePriceIndex: 1,
+        pricePph025Index: 2
+      },
+      elementKeywords: record.elementKeywords.length ? record.elementKeywords : ["Emas Batangan", "Perak Murni"],
+      boundaryStartKeywords: record.boundaryStartKeywords?.length ? record.boundaryStartKeywords : ["Emas Batangan", "Perak Murni"],
+      boundaryStopKeywords: record.boundaryStopKeywords?.length
+        ? record.boundaryStopKeywords
+        : ["Emas Batangan Gift Series", "Emas Batangan Selamat Idul Fitri", "Emas Batangan Imlek", "Emas Batangan Batik Seri III", "Perak Heritage"]
+    };
+  }
+
+  return record;
 }
 
 function templateRecordFromRow(row: Record<string, unknown>): ArticleTemplateRecord {

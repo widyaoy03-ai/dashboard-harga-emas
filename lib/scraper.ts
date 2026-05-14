@@ -7,6 +7,50 @@ import type { DashboardNotification, GoldPriceRow, GoldPriceSnapshot, Portal, So
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
+type FetchDiagnostics = {
+  ok: boolean;
+  status: number;
+  statusText?: string;
+  finalUrl: string;
+  htmlSize: number;
+  elapsedMs: number;
+  attempts: number;
+  contentType?: string | null;
+  blockedHint?: string | null;
+  errorName?: string | null;
+  errorMessage?: string | null;
+  sampleHtml?: string;
+};
+
+function browserLikeHeaders(url: string, attempt: number): HeadersInit {
+  const isMobileFallback = attempt > 1;
+  const baseUrl = new URL(url);
+  return {
+    "user-agent": isMobileFallback
+      ? "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1"
+      : userAgent,
+    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+    "cache-control": "no-cache",
+    pragma: "no-cache",
+    referer: `${baseUrl.protocol}//${baseUrl.host}/`,
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+    "upgrade-insecure-requests": "1"
+  };
+}
+
+function blockedHintFromHtml(html: string, status: number) {
+  const sample = html.slice(0, 3000).toLowerCase();
+  if ([401, 403, 429, 503].includes(status)) return `HTTP ${status} mengindikasikan akses ditolak/rate limited.`;
+  if (/cloudflare|cf-ray|captcha|access denied|forbidden|blocked|bot detection|enable javascript/i.test(sample)) {
+    return "Response mengandung indikasi proteksi anti-bot/captcha/access denied.";
+  }
+  if (html && html.length < 200) return "Response terlalu pendek sehingga kemungkinan kosong/truncated.";
+  return null;
+}
+
 function todayJakarta() {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Jakarta",
@@ -548,27 +592,56 @@ function applyHistoricalComparison(rows: GoldPriceRow[], previous: GoldPriceSnap
 
 async function fetchHtml(url: string, maxAttempts = 2) {
   let lastError: unknown = null;
+  let lastDiagnostics: FetchDiagnostics | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const startedAt = Date.now();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), 25000);
     try {
       const response = await fetch(url, {
-        headers: {
-          "user-agent": userAgent,
-          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
-        },
+        headers: browserLikeHeaders(url, attempt),
         redirect: "follow",
         signal: controller.signal,
         cache: "no-store"
       });
 
       const html = await response.text();
-      if (response.ok || attempt === maxAttempts) return { ok: response.ok, status: response.status, finalUrl: response.url, html };
+      lastDiagnostics = {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        finalUrl: response.url,
+        htmlSize: html.length,
+        elapsedMs: Date.now() - startedAt,
+        attempts: attempt,
+        contentType: response.headers.get("content-type"),
+        blockedHint: blockedHintFromHtml(html, response.status),
+        errorName: null,
+        errorMessage: null,
+        sampleHtml: html.slice(0, 500)
+      };
+      if (response.ok || attempt === maxAttempts) {
+        return { ok: response.ok, status: response.status, statusText: response.statusText, finalUrl: response.url, html, diagnostics: lastDiagnostics };
+      }
       console.warn(`[scraper] Fetch ${url} returned HTTP ${response.status}. Retry ${attempt}/${maxAttempts}.`);
     } catch (error) {
       lastError = error;
+      const errorName = error instanceof Error ? error.name : "UnknownError";
+      const errorMessage = error instanceof Error ? error.message : "Fetch source gagal.";
+      lastDiagnostics = {
+        ok: false,
+        status: 0,
+        finalUrl: url,
+        htmlSize: 0,
+        elapsedMs: Date.now() - startedAt,
+        attempts: attempt,
+        contentType: null,
+        blockedHint: errorName === "AbortError" ? "Request timeout." : null,
+        errorName,
+        errorMessage,
+        sampleHtml: ""
+      };
       console.warn(`[scraper] Fetch ${url} failed on attempt ${attempt}/${maxAttempts}.`, error);
       if (attempt === maxAttempts) break;
     } finally {
@@ -582,8 +655,39 @@ async function fetchHtml(url: string, maxAttempts = 2) {
     status: 0,
     finalUrl: url,
     html: "",
-    error: lastError instanceof Error ? lastError.message : "Fetch source gagal."
+    error: lastError instanceof Error ? `${lastError.name}: ${lastError.message}` : "Fetch source gagal.",
+    diagnostics:
+      lastDiagnostics ?? {
+        ok: false,
+        status: 0,
+        finalUrl: url,
+        htmlSize: 0,
+        elapsedMs: 0,
+        attempts: maxAttempts,
+        contentType: null,
+        blockedHint: null,
+        errorName: lastError instanceof Error ? lastError.name : "UnknownError",
+        errorMessage: lastError instanceof Error ? lastError.message : "Fetch source gagal.",
+        sampleHtml: ""
+      }
   };
+}
+
+function fetchFailureMessage(sourceName: string, fetched: Awaited<ReturnType<typeof fetchHtml>>) {
+  const diagnostics = fetched.diagnostics;
+  if (diagnostics?.errorMessage) {
+    return `Source ${sourceName} tidak dapat diakses. Detail teknis: ${diagnostics.errorName ?? "FetchError"} - ${diagnostics.errorMessage}.`;
+  }
+  if (diagnostics?.blockedHint) {
+    return `Source ${sourceName} merespons, tetapi terindikasi diblokir. Detail: ${diagnostics.blockedHint}`;
+  }
+  if (!fetched.ok) {
+    return `Source ${sourceName} mengembalikan HTTP ${fetched.status}${fetched.statusText ? ` ${fetched.statusText}` : ""}.`;
+  }
+  if ((diagnostics?.htmlSize ?? fetched.html.length) < 200) {
+    return `Source ${sourceName} merespons, tetapi HTML kosong/terlalu pendek (${diagnostics?.htmlSize ?? fetched.html.length} karakter).`;
+  }
+  return `Source ${sourceName} sedang tidak dapat diakses.`;
 }
 
 function createLogamMuliaSourceConfig(url: string): SourceConfig {
@@ -592,7 +696,7 @@ function createLogamMuliaSourceConfig(url: string): SourceConfig {
     url,
     mode: "otomatis",
     group: "antam",
-    selectorSummary: "Section-aware parser untuk Emas Batangan, Perak Murni, dan Perak Heritage",
+    selectorSummary: "Section-aware parser untuk Emas Batangan dan Perak Murni",
     parserType: "logam-mulia",
     dataSelector: "table.table-bordered",
     rowSelector: "table.table-bordered tr",
@@ -718,13 +822,13 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
   }
 
   try {
-    const fetched = await fetchHtml(source.url);
+    const fetched = await fetchHtml(source.url, 3);
     if (!fetched.ok || fetched.html.length < 200) {
       return {
         ...base,
         id: crypto.randomUUID(),
         status: "error",
-        catatan: `Source ${source.name} sedang tidak dapat diakses. Silakan coba beberapa saat lagi.`
+        catatan: fetchFailureMessage(source.name, fetched)
       };
     }
 
@@ -737,17 +841,23 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
         ...base,
         id: crypto.randomUUID(),
         status: "error",
-        catatan: `Data harga dari ${source.name} tidak dapat ditarik karena element sumber tidak ditemukan.`
+        catatan: `Data harga dari ${source.name} tidak dapat ditarik karena element sumber tidak ditemukan. Keyword dicek: ${source.elementKeywords.join(", ") || "-"}. HTML size: ${fetched.diagnostics.htmlSize}.`
       };
     }
 
     const rows = extractPriceRows(source, jenisKonten, fetched.html, visibleText);
     if (!rows.length) {
+      const logamDebug =
+        source.parserType === "logam-mulia" || source.name === "Logam Mulia"
+          ? parseLogamMuliaSections(source, jenisKonten, fetched.html, visibleText)
+          : null;
       return {
         ...base,
         id: crypto.randomUUID(),
         status: "error",
-        catatan: `Data harga dari ${source.name} tidak dapat ditarik karena kesalahan sistem.`
+        catatan: logamDebug
+          ? `Data harga dari ${source.name} tidak dapat diparse. HTTP ${fetched.status}, HTML ${fetched.diagnostics.htmlSize} karakter, selector ${configuredRowSelector(source) ?? "-"}, section ditemukan: ${logamDebug.foundSections.join(", ") || "-"}, row valid: ${logamDebug.rows.length}, row di-skip: ${logamDebug.invalidRowsSkipped}.`
+          : `Data harga dari ${source.name} tidak dapat diparse. HTTP ${fetched.status}, HTML ${fetched.diagnostics.htmlSize} karakter, selector ${configuredRowSelector(source) ?? "-"}.`
       };
     }
 
@@ -774,12 +884,12 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
     provisional.percentage_change = comparison.percentage;
 
     return provisional;
-  } catch {
+  } catch (error) {
     return {
       ...base,
       id: crypto.randomUUID(),
       status: "error",
-      catatan: `Data harga dari ${source.name} tidak dapat ditarik karena kesalahan sistem.`
+      catatan: `Data harga dari ${source.name} tidak dapat ditarik karena kesalahan sistem: ${error instanceof Error ? `${error.name} - ${error.message}` : "unknown error"}.`
     };
   }
 }
@@ -795,6 +905,7 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
       rowsFound: 0,
       validRows: 0,
       rows: [] as GoldPriceRow[],
+      fetch: null,
       message: `${source.name} berstatus manual, tidak menjalankan scraping otomatis.`
     };
   }
@@ -809,7 +920,8 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
         rowsFound: 0,
         validRows: 0,
         rows: [] as GoldPriceRow[],
-        message: `URL tidak bisa diakses atau konten kosong. HTTP ${fetched.status}.`
+        fetch: fetched.diagnostics,
+        message: fetchFailureMessage(source.name, fetched)
       };
     }
 
@@ -828,6 +940,7 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
       rowsFound: candidateRows,
       validRows: rows.length,
       rows: rows.slice(0, 20),
+      fetch: fetched.diagnostics,
       debug: logamMuliaDebug
         ? {
             parser: "logam-mulia-section-based",
@@ -851,6 +964,16 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
       rowsFound: 0,
       validRows: 0,
       rows: [] as GoldPriceRow[],
+      fetch: {
+        ok: false,
+        status: 0,
+        finalUrl: source.url,
+        htmlSize: 0,
+        elapsedMs: 0,
+        attempts: 0,
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : "Preview gagal karena kesalahan sistem."
+      },
       debug: undefined,
       message: error instanceof Error ? `Preview gagal: ${error.message}` : "Preview gagal karena kesalahan sistem."
     };
@@ -875,6 +998,7 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
   let sampleHtml = "";
   let sampleParsedRow: GoldPriceRow | null = null;
   let logamMuliaDebug: ReturnType<typeof parseLogamMuliaSections> | null = null;
+  let fetchDiagnostics: FetchDiagnostics | null = null;
 
   const invalidResult = () => ({
     ok: false,
@@ -886,6 +1010,7 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
     recommendations,
     debug: {
       selector,
+      fetch: fetchDiagnostics,
       elementCount,
       rowCount,
       validDataCount,
@@ -909,10 +1034,11 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
 
   try {
     const fetched = await fetchHtml(source.url);
+    fetchDiagnostics = fetched.diagnostics;
     checks.urlAccessible = fetched.ok && fetched.html.length >= 200;
 
     if (!checks.urlAccessible) {
-      reasons.push(`URL tidak bisa diakses atau konten kosong. HTTP ${fetched.status}.`);
+      reasons.push(fetchFailureMessage(source.name, fetched));
       recommendations.push("Periksa URL source, akses publik halaman, atau proteksi anti-bot dari website tujuan.");
       return invalidResult();
     }
@@ -989,6 +1115,7 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
       recommendations,
       debug: {
         selector,
+        fetch: fetchDiagnostics,
         elementCount,
         rowCount,
         validDataCount,
