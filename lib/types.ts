@@ -151,6 +151,29 @@ export interface GoldPriceSnapshot {
   price_rows: GoldPriceRow[];
 }
 
+export type SourceDataCellValue = string | number | null;
+
+export interface SourceDataColumn {
+  key: string;
+  label: string;
+  align?: "left" | "right";
+  type?: "text" | "price" | "number" | "percent";
+}
+
+export interface SourceDataView {
+  source: SourceName;
+  source_url: string;
+  status: SourceRunStatus;
+  update_time: string | null;
+  run_time: string;
+  row_count: number;
+  schema: string[];
+  columns: SourceDataColumn[];
+  rows: Array<Record<string, SourceDataCellValue>>;
+  message?: string;
+  currency?: "IDR" | "USD";
+}
+
 export interface RunDataResponse {
   ok: boolean;
   portal: Portal;
@@ -158,6 +181,7 @@ export interface RunDataResponse {
   selected_source?: SourceName | null;
   selected_sources?: SourceName[];
   snapshots: GoldPriceSnapshot[];
+  source_views?: SourceDataView[];
   notifications: DashboardNotification[];
   partialFailure: boolean;
   disclaimer?: string;

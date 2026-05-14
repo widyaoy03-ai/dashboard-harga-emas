@@ -1,5 +1,6 @@
 import { queryHtmlRows, queryHtmlSelections } from "./html-selector";
 import { getRuntimeSourcesForContent } from "./admin-storage";
+import { buildSourceDataViews } from "./source-data-view";
 import { findPreviousSnapshot, saveSnapshots } from "./storage";
 import type { DashboardNotification, GoldPriceRow, GoldPriceSnapshot, Portal, SourceConfig } from "./types";
 
@@ -964,6 +965,7 @@ export async function runData(portal: Portal, jenisKonten: string, selectedSourc
       selected_source: selectedList[0] ?? null,
       selected_sources: selectedList,
       snapshots: [],
+      source_views: [],
       notifications: [
         {
           id: crypto.randomUUID(),
@@ -1027,6 +1029,7 @@ export async function runData(portal: Portal, jenisKonten: string, selectedSourc
     selected_source: selectedList[0] ?? null,
     selected_sources: selectedList.length ? selectedList : sources.map((source) => source.name),
     snapshots,
+    source_views: buildSourceDataViews(snapshots),
     notifications,
     partialFailure,
     disclaimer: partialFailure ? "Sebagian source tidak berhasil dimuat. Artikel dibuat berdasarkan data yang tersedia." : undefined

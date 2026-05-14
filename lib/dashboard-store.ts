@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import type { DashboardNotification, GeneratedArticle, GoldPriceSnapshot, Portal } from "./types";
+import type { DashboardNotification, GeneratedArticle, GoldPriceSnapshot, Portal, SourceDataView } from "./types";
 
 const NOTIFICATION_TTL = 15_000;
 
@@ -12,6 +12,7 @@ interface DashboardState {
   selectedSources: string[];
   activeTab: string;
   snapshots: GoldPriceSnapshot[];
+  sourceDataViews: SourceDataView[];
   article: GeneratedArticle | null;
   notifications: DashboardNotification[];
   setActiveTab: (activeTab: string) => void;
@@ -20,6 +21,7 @@ interface DashboardState {
   setSourceName: (sourceName: string) => void;
   setSelectedSources: (selectedSources: string[]) => void;
   setSnapshots: (snapshots: GoldPriceSnapshot[]) => void;
+  setSourceDataViews: (sourceDataViews: SourceDataView[]) => void;
   setArticle: (article: GeneratedArticle | null) => void;
   pushNotifications: (notifications: DashboardNotification[]) => void;
   dismissNotification: (id: string) => void;
@@ -32,6 +34,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   selectedSources: [],
   activeTab: "Overview",
   snapshots: [],
+  sourceDataViews: [],
   article: null,
   notifications: [
     {
@@ -50,12 +53,14 @@ export const useDashboardStore = create<DashboardState>((set) => ({
       sourceName: "Semua Source",
       selectedSources: [],
       snapshots: [],
+      sourceDataViews: [],
       article: null
     })),
-  setJenisKonten: (jenisKonten) => set({ jenisKonten, sourceName: "Semua Source", selectedSources: [], snapshots: [], article: null }),
-  setSourceName: (sourceName) => set({ sourceName, selectedSources: sourceName === "Semua Source" ? [] : [sourceName], snapshots: [], article: null }),
-  setSelectedSources: (selectedSources) => set({ selectedSources, sourceName: selectedSources.length === 1 ? selectedSources[0] : "Semua Source", snapshots: [], article: null }),
+  setJenisKonten: (jenisKonten) => set({ jenisKonten, sourceName: "Semua Source", selectedSources: [], snapshots: [], sourceDataViews: [], article: null }),
+  setSourceName: (sourceName) => set({ sourceName, selectedSources: sourceName === "Semua Source" ? [] : [sourceName], snapshots: [], sourceDataViews: [], article: null }),
+  setSelectedSources: (selectedSources) => set({ selectedSources, sourceName: selectedSources.length === 1 ? selectedSources[0] : "Semua Source", snapshots: [], sourceDataViews: [], article: null }),
   setSnapshots: (snapshots) => set({ snapshots }),
+  setSourceDataViews: (sourceDataViews) => set({ sourceDataViews }),
   setArticle: (article) => set({ article }),
   pushNotifications: (notifications) =>
     set((state) => {

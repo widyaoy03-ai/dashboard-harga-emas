@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   Clipboard,
   Database,
+  Download,
   Edit3,
   FileText,
   HelpCircle,
@@ -29,6 +30,7 @@ import {
 import { AdminCMSPanel } from "@/components/AdminCMSPanel";
 import { contentSourceMap, menuItems, portalContentTypes, preflightRows, sourceConfigs } from "@/lib/content-framework";
 import { useDashboardStore } from "@/lib/dashboard-store";
+import { buildSourceDataViews } from "@/lib/source-data-view";
 import type {
   ArticleDraftRecord,
   DashboardNotification,
@@ -37,7 +39,9 @@ import type {
   GoldPriceRow,
   GoldPriceSnapshot,
   Portal,
-  RunDataResponse
+  RunDataResponse,
+  SourceDataColumn,
+  SourceDataView
 } from "@/lib/types";
 
 const queryClient = new QueryClient();
@@ -575,6 +579,139 @@ function PriceDataTable({ rows, emptyMessage, showContent = false }: { rows: Pri
   );
 }
 
+function formatSourceCell(value: unknown, column: SourceDataColumn, view: SourceDataView) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (column.type === "price") {
+    if (typeof value === "number") {
+      return view.currency === "USD"
+        ? `US$ ${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : `Rp ${value.toLocaleString("id-ID")}`;
+    }
+    return formatMoney(String(value));
+  }
+  return String(value);
+}
+
+function sourceViewToTsv(view: SourceDataView) {
+  const headers = view.columns.map((column) => column.label).join("\t");
+  const rows = view.rows.map((row) => view.columns.map((column) => formatSourceCell(row[column.key], column, view)).join("\t"));
+  return [`Source\t${view.source}`, `Update\t${view.update_time ?? "-"}`, `Status\t${view.status}`, "", headers, ...rows].join("\n");
+}
+
+function downloadSourceDataView(view: SourceDataView) {
+  const blob = new Blob([sourceViewToTsv(view)], { type: "text/tab-separated-values;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${view.source.toLowerCase().replace(/[^a-z0-9]+/gi, "-")}-${view.run_time.slice(0, 10)}.tsv`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
+
+function SourceDataCards({ views, emptyMessage }: { views: SourceDataView[]; emptyMessage: string }) {
+  const pushNotifications = useDashboardStore((state) => state.pushNotifications);
+
+  if (!views.length) {
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-background p-8 text-center text-sm text-textSecondary">
+        {emptyMessage}
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-4">
+      {views.map((view) => (
+        <article key={`${view.source}-${view.run_time}`} className="rounded-lg border border-border bg-background p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-base font-bold text-primary">
+                  <a href={view.source_url} target="_blank" rel="noreferrer">
+                    {view.source}
+                  </a>
+                </h3>
+                <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(view.status)}`}>
+                  {view.status}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-textSecondary">
+                Update terakhir: {view.update_time ?? "-"} | Run: {formatDateTime(view.run_time)}
+              </p>
+              <p className="mt-1 text-xs text-textSecondary">Schema: {view.schema.length ? view.schema.join(", ") : "Tidak ada row valid"}</p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-xs font-semibold text-textSecondary"
+                onClick={async () => {
+                  const copied = await copyTextWithFallback(sourceViewToTsv(view));
+                  pushNotifications([
+                    {
+                      id: crypto.randomUUID(),
+                      kind: copied ? "success" : "warning",
+                      title: copied ? "Data tersalin" : "Copy perlu dicek",
+                      message: copied ? `Data ${view.source} berhasil disalin.` : "Browser tidak mengizinkan clipboard otomatis."
+                    }
+                  ]);
+                }}
+              >
+                <Clipboard className="h-4 w-4" />
+                Copy
+              </button>
+              <button
+                type="button"
+                className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-xs font-semibold text-textSecondary"
+                onClick={() => downloadSourceDataView(view)}
+              >
+                <Download className="h-4 w-4" />
+                Export
+              </button>
+            </div>
+          </div>
+
+          {view.message && <p className="mt-3 rounded-md border border-border bg-surface px-3 py-2 text-xs text-textSecondary">{view.message}</p>}
+
+          <div className="mt-3 overflow-x-auto stable-scrollbar">
+            <table className="w-full min-w-[520px] border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-border bg-surface text-left text-textSecondary">
+                  {view.columns.map((column) => (
+                    <th key={column.key} className={`px-3 py-3 font-semibold ${column.align === "right" ? "text-right" : "text-left"}`}>
+                      {column.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {view.rows.length ? (
+                  view.rows.map((row, rowIndex) => (
+                    <tr key={`${view.source}-${rowIndex}`} className="border-b border-border/70 last:border-b-0">
+                      {view.columns.map((column) => (
+                        <td key={column.key} className={`px-3 py-3 ${column.align === "right" ? "text-right font-semibold text-textPrimary" : "text-textSecondary"}`}>
+                          {formatSourceCell(row[column.key], column, view)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={Math.max(view.columns.length, 1)} className="px-3 py-8 text-center text-textSecondary">
+                      Tidak ada row valid untuk source ini.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function SourceManagement() {
   const portal = useDashboardStore((state) => state.portal);
   const jenisKonten = useDashboardStore((state) => state.jenisKonten);
@@ -628,9 +765,14 @@ function RunDataPanel() {
   const jenisKonten = useDashboardStore((state) => state.jenisKonten);
   const selectedSources = useDashboardStore((state) => state.selectedSources);
   const snapshots = useDashboardStore((state) => state.snapshots);
+  const sourceDataViews = useDashboardStore((state) => state.sourceDataViews);
   const setSnapshots = useDashboardStore((state) => state.setSnapshots);
+  const setSourceDataViews = useDashboardStore((state) => state.setSourceDataViews);
   const pushNotifications = useDashboardStore((state) => state.pushNotifications);
-  const priceRows = useMemo(() => flattenPriceRows(snapshots), [snapshots]);
+  const visibleSourceViews = useMemo(
+    () => (sourceDataViews.length ? sourceDataViews : buildSourceDataViews(snapshots)),
+    [snapshots, sourceDataViews]
+  );
 
   const runMutation = useMutation({
     mutationFn: async () => {
@@ -645,6 +787,7 @@ function RunDataPanel() {
     },
     onSuccess: (data) => {
       setSnapshots(data.snapshots);
+      setSourceDataViews(data.source_views ?? buildSourceDataViews(data.snapshots));
       queryClient.invalidateQueries({ queryKey: ["history"] });
       pushNotifications(data.notifications);
     },
@@ -686,7 +829,7 @@ function RunDataPanel() {
         </button>
       </div>
       <div className="mt-5">
-        <PriceDataTable rows={priceRows} emptyMessage="Belum ada data. Jalankan RUN DATA terlebih dahulu." />
+        <SourceDataCards views={visibleSourceViews} emptyMessage="Belum ada data. Jalankan RUN DATA terlebih dahulu." />
       </div>
     </section>
   );
@@ -697,14 +840,19 @@ function GenerateArticlePanel() {
   const jenisKonten = useDashboardStore((state) => state.jenisKonten);
   const selectedSources = useDashboardStore((state) => state.selectedSources);
   const snapshots = useDashboardStore((state) => state.snapshots);
+  const sourceDataViews = useDashboardStore((state) => state.sourceDataViews);
   const setArticle = useDashboardStore((state) => state.setArticle);
   const setSnapshots = useDashboardStore((state) => state.setSnapshots);
+  const setSourceDataViews = useDashboardStore((state) => state.setSourceDataViews);
   const pushNotifications = useDashboardStore((state) => state.pushNotifications);
   const [triggeredBy, setTriggeredBy] = useState(() => (typeof window === "undefined" ? "Editor Piket" : window.localStorage.getItem("editorPiket") ?? "Editor Piket"));
   const [assignedEditor, setAssignedEditor] = useState(triggeredBy);
   const [selectedDraft, setSelectedDraft] = useState<ArticleDraftRecord | null>(null);
   const [detailDraft, setDetailDraft] = useState<ArticleDraftRecord | null>(null);
-  const priceRows = useMemo(() => flattenPriceRows(snapshots), [snapshots]);
+  const visibleSourceViews = useMemo(
+    () => (sourceDataViews.length ? sourceDataViews : buildSourceDataViews(snapshots)),
+    [snapshots, sourceDataViews]
+  );
   const usableSnapshots = useMemo(
     () =>
       snapshots.filter(
@@ -737,6 +885,7 @@ function GenerateArticlePanel() {
     },
     onSuccess: (data) => {
       setSnapshots(data.snapshots);
+      setSourceDataViews(data.source_views ?? buildSourceDataViews(data.snapshots));
       queryClient.invalidateQueries({ queryKey: ["history"] });
       pushNotifications(data.notifications);
     },
@@ -873,7 +1022,7 @@ function GenerateArticlePanel() {
         )}
 
         <div className="mt-5">
-          <PriceDataTable rows={priceRows} emptyMessage="Belum ada data. Klik Run Data untuk menarik data source." showContent />
+          <SourceDataCards views={visibleSourceViews} emptyMessage="Belum ada data. Klik Run Data untuk menarik data source." />
         </div>
       </div>
 
@@ -1164,6 +1313,7 @@ function DataHargaEmasPanel() {
   const selectedSources = useDashboardStore((state) => state.selectedSources);
   const snapshots = useDashboardStore((state) => state.snapshots);
   const setSnapshots = useDashboardStore((state) => state.setSnapshots);
+  const setSourceDataViews = useDashboardStore((state) => state.setSourceDataViews);
   const pushNotifications = useDashboardStore((state) => state.pushNotifications);
   const [sourceFilter, setSourceFilter] = useState("Semua");
   const [dateFilter, setDateFilter] = useState("");
@@ -1193,6 +1343,7 @@ function DataHargaEmasPanel() {
     },
     onSuccess: (data) => {
       setSnapshots(data.snapshots);
+      setSourceDataViews(data.source_views ?? buildSourceDataViews(data.snapshots));
       queryClient.invalidateQueries({ queryKey: ["history"] });
       pushNotifications(data.notifications);
     },
@@ -1319,7 +1470,7 @@ function DataHargaEmasPanel() {
           <span className="text-sm text-textSecondary">{latestBySource.length} source</span>
         </div>
         <div className="mt-3">
-          <PriceDataTable rows={flattenPriceRows(latestBySource)} emptyMessage="Belum ada data terbaru. Klik Ambil Data Sekarang." showContent />
+          <SourceDataCards views={buildSourceDataViews(latestBySource)} emptyMessage="Belum ada data terbaru. Klik Ambil Data Sekarang." />
         </div>
       </div>
 
@@ -1376,7 +1527,7 @@ function DataHargaEmasPanel() {
                 <span className="text-sm text-textSecondary">{flattenPriceRows(sourceSnapshots).length} row harga historis</span>
               </div>
               <div className="mt-3">
-                <PriceDataTable rows={flattenPriceRows(sourceSnapshots)} emptyMessage="Tidak ada data untuk filter ini." showContent />
+                <SourceDataCards views={buildSourceDataViews(sourceSnapshots)} emptyMessage="Tidak ada data untuk filter ini." />
               </div>
             </div>
           ))
@@ -1398,7 +1549,7 @@ function HistoriPanel() {
       <h2 className="text-lg font-bold text-textPrimary">Histori Data</h2>
       <p className="mt-1 text-sm text-textSecondary">Snapshot tidak dioverwrite. Histori lengkap juga tersedia di tab Data Harga Emas.</p>
       <div className="mt-4">
-        <PriceDataTable rows={flattenPriceRows(latestSuccess)} emptyMessage="Histori sesi ini akan muncul setelah Run Data." showContent />
+        <SourceDataCards views={buildSourceDataViews(latestSuccess)} emptyMessage="Histori sesi ini akan muncul setelah Run Data." />
       </div>
     </section>
   );
