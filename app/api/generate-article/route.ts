@@ -53,6 +53,7 @@ const snapshotSchema = z.object({
 const schema = z.object({
   portal: z.enum(["Beritasatu", "Investor Daily"]),
   jenisKonten: z.string().optional().default("Artikel Harga Emas/Perak"),
+  mode: z.enum(["template", "ai"]).optional().default("template"),
   snapshots: z.array(snapshotSchema),
   triggeredBy: z.string().optional(),
   assignedEditor: z.string().optional()
@@ -82,7 +83,8 @@ export async function POST(request: Request) {
   const response = await generateArticle(
     parsed.data.portal as Portal,
     parsed.data.jenisKonten,
-    parsed.data.snapshots as GoldPriceSnapshot[]
+    parsed.data.snapshots as GoldPriceSnapshot[],
+    parsed.data.mode
   );
 
   if (response.ok && response.article) {
@@ -90,10 +92,11 @@ export async function POST(request: Request) {
     const dataStatus: DataStatus =
       successful.length === parsed.data.snapshots.length ? "Success" : successful.length > 0 ? "Partial Success" : "Failed";
     const now = new Date();
+    const contextLabel = `${parsed.data.mode === "ai" ? "AI" : "Template"} - ${parsed.data.jenisKonten}`;
     const draft: ArticleDraftRecord = await saveArticleDraft({
       id: crypto.randomUUID(),
       portal: parsed.data.portal as Portal,
-      jenis_konten: parsed.data.jenisKonten,
+      jenis_konten: contextLabel,
       title: response.article.headline,
       lead: response.article.lead,
       body: response.article.body,

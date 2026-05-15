@@ -36,6 +36,7 @@ import type {
   DashboardNotification,
   DraftStatus,
   GenerateArticleResponse,
+  GenerateMode,
   GoldPriceRow,
   GoldPriceSnapshot,
   Portal,
@@ -46,6 +47,11 @@ import type {
 
 const queryClient = new QueryClient();
 const ALL_SOURCES = "Semua Source";
+const SOURCE_BASED_CONTENT_LABEL = "Source-Based Harga Emas/Perak";
+
+function sourceContextLabel(selectedSources: string[]) {
+  return selectedSources.length ? `Source: ${selectedSources.join(", ")}` : "Semua Source Aktif";
+}
 
 const iconMap = {
   Overview: LayoutDashboard,
@@ -379,11 +385,11 @@ function MobileNavigation() {
   );
 }
 
-function useSourceOptions(portal: Portal, jenisKonten: string) {
+function useSourceOptions(portal: Portal) {
   return useQuery({
-    queryKey: ["runtime-sources", portal, jenisKonten],
+    queryKey: ["runtime-sources", portal],
     queryFn: async () => {
-      const params = new URLSearchParams({ portal, jenisKonten });
+      const params = new URLSearchParams({ portal });
       const response = await fetch(`/api/sources?${params.toString()}`);
       const data = (await response.json()) as SourceResponse;
       if (!response.ok) throw data;
@@ -394,12 +400,10 @@ function useSourceOptions(portal: Portal, jenisKonten: string) {
 
 function PortalControls() {
   const portal = useDashboardStore((state) => state.portal);
-  const jenisKonten = useDashboardStore((state) => state.jenisKonten);
   const selectedSources = useDashboardStore((state) => state.selectedSources);
   const setPortal = useDashboardStore((state) => state.setPortal);
-  const setJenisKonten = useDashboardStore((state) => state.setJenisKonten);
   const setSelectedSources = useDashboardStore((state) => state.setSelectedSources);
-  const sourceQuery = useSourceOptions(portal, jenisKonten);
+  const sourceQuery = useSourceOptions(portal);
   const sourceOptions = sourceQuery.data ?? [];
   const activeSourceNames = selectedSources.length ? selectedSources : sourceOptions.map((source) => source.name);
 
@@ -416,7 +420,7 @@ function PortalControls() {
   }
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[220px_1fr_420px]">
+    <div className="grid gap-4 xl:grid-cols-[220px_1fr]">
       <label className="grid gap-2">
         <FieldLabel tooltip="Menentukan gaya penulisan artikel. Beritasatu cepat dan ringkas, Investor Daily analitis dan market-oriented." detailId="docs-generate">
           Portal
@@ -427,20 +431,6 @@ function PortalControls() {
           className="h-11 rounded-lg border border-border bg-surface px-3 text-sm outline-none focus:border-primary"
         >
           {Object.keys(portalContentTypes).map((item) => (
-            <option key={item}>{item}</option>
-          ))}
-        </select>
-      </label>
-      <label className="grid gap-2">
-        <FieldLabel tooltip="Menentukan template artikel yang digunakan berdasarkan jenis berita emas." detailId="docs-jenis-konten">
-          Jenis Konten
-        </FieldLabel>
-        <select
-          value={jenisKonten}
-          onChange={(event) => setJenisKonten(event.target.value)}
-          className="h-11 rounded-lg border border-border bg-surface px-3 text-sm outline-none focus:border-primary"
-        >
-          {portalContentTypes[portal].map((item) => (
             <option key={item}>{item}</option>
           ))}
         </select>
@@ -714,18 +704,19 @@ function SourceDataCards({ views, emptyMessage }: { views: SourceDataView[]; emp
 
 function SourceManagement() {
   const portal = useDashboardStore((state) => state.portal);
-  const jenisKonten = useDashboardStore((state) => state.jenisKonten);
-  const selectedSources = contentSourceMap[portal][jenisKonten] ?? [];
+  const selectedSources = useDashboardStore((state) => state.selectedSources);
+  const portalSourceNames = useMemo(() => [...new Set(Object.values(contentSourceMap[portal]).flat())], [portal]);
+  const visibleSources = selectedSources.length ? selectedSources : portalSourceNames;
 
   return (
     <section className="rounded-lg border border-border bg-surface p-5 shadow-panel">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-bold text-textPrimary">Source Management</h2>
-          <p className="mt-1 text-sm text-textSecondary">Mapping source mengikuti template, Excel, dan pengaturan admin yang sudah divalidasi.</p>
+          <p className="mt-1 text-sm text-textSecondary">Source mengikuti pilihan portal dan pengaturan admin yang sudah divalidasi.</p>
         </div>
         <span className="rounded-full border border-primary/20 bg-primary/5 px-3 py-1 text-sm font-semibold text-primary">
-          {portal} / {jenisKonten}
+          {portal}
         </span>
       </div>
       <div className="mt-5 overflow-x-auto stable-scrollbar">
@@ -740,7 +731,7 @@ function SourceManagement() {
           </thead>
           <tbody>
             {sourceConfigs
-              .filter((source) => selectedSources.includes(source.name))
+              .filter((source) => visibleSources.includes(source.name))
               .map((source) => (
                 <tr key={source.name} className="border-b border-border/70">
                   <td className="px-3 py-3 font-semibold text-textPrimary">{source.name}</td>
@@ -762,7 +753,6 @@ function SourceManagement() {
 
 function RunDataPanel() {
   const portal = useDashboardStore((state) => state.portal);
-  const jenisKonten = useDashboardStore((state) => state.jenisKonten);
   const selectedSources = useDashboardStore((state) => state.selectedSources);
   const snapshots = useDashboardStore((state) => state.snapshots);
   const sourceDataViews = useDashboardStore((state) => state.sourceDataViews);
@@ -779,7 +769,7 @@ function RunDataPanel() {
       const response = await fetch("/api/run-data", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ portal, jenisKonten, sources: selectedSources })
+        body: JSON.stringify({ portal, jenisKonten: SOURCE_BASED_CONTENT_LABEL, sources: selectedSources })
       });
       const data = (await response.json()) as RunDataResponse;
       if (!response.ok) throw data;
@@ -837,7 +827,6 @@ function RunDataPanel() {
 
 function GenerateArticlePanel() {
   const portal = useDashboardStore((state) => state.portal);
-  const jenisKonten = useDashboardStore((state) => state.jenisKonten);
   const selectedSources = useDashboardStore((state) => state.selectedSources);
   const snapshots = useDashboardStore((state) => state.snapshots);
   const sourceDataViews = useDashboardStore((state) => state.sourceDataViews);
@@ -845,10 +834,12 @@ function GenerateArticlePanel() {
   const setSnapshots = useDashboardStore((state) => state.setSnapshots);
   const setSourceDataViews = useDashboardStore((state) => state.setSourceDataViews);
   const pushNotifications = useDashboardStore((state) => state.pushNotifications);
+  const [generateMode, setGenerateMode] = useState<GenerateMode>("template");
   const [triggeredBy, setTriggeredBy] = useState(() => (typeof window === "undefined" ? "Editor Piket" : window.localStorage.getItem("editorPiket") ?? "Editor Piket"));
   const [assignedEditor, setAssignedEditor] = useState(triggeredBy);
   const [selectedDraft, setSelectedDraft] = useState<ArticleDraftRecord | null>(null);
   const [detailDraft, setDetailDraft] = useState<ArticleDraftRecord | null>(null);
+  const contentLabel = sourceContextLabel(selectedSources);
   const visibleSourceViews = useMemo(
     () => (sourceDataViews.length ? sourceDataViews : buildSourceDataViews(snapshots)),
     [snapshots, sourceDataViews]
@@ -860,7 +851,7 @@ function GenerateArticlePanel() {
       ),
     [snapshots, selectedSources]
   );
-  const canGenerate = Boolean(portal && jenisKonten && usableSnapshots.length);
+  const canGenerate = Boolean(portal && usableSnapshots.length);
 
   const draftsQuery = useQuery({
     queryKey: ["drafts"],
@@ -877,7 +868,7 @@ function GenerateArticlePanel() {
       const response = await fetch("/api/run-data", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ portal, jenisKonten, sources: selectedSources })
+        body: JSON.stringify({ portal, jenisKonten: SOURCE_BASED_CONTENT_LABEL, sources: selectedSources })
       });
       const data = (await response.json()) as RunDataResponse;
       if (!response.ok) throw data;
@@ -922,7 +913,7 @@ function GenerateArticlePanel() {
       const response = await fetch("/api/generate-article", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ portal, jenisKonten, snapshots: usableSnapshots, triggeredBy, assignedEditor })
+        body: JSON.stringify({ portal, jenisKonten: contentLabel, mode: generateMode, snapshots: usableSnapshots, triggeredBy, assignedEditor })
       });
       const data = (await response.json()) as GenerateArticleResponse;
       if (!response.ok) throw data;
@@ -956,10 +947,10 @@ function GenerateArticlePanel() {
           <div>
             <h2 className="inline-flex items-center gap-2 text-lg font-bold text-textPrimary">
               Generate Artikel
-              <HelpTooltip text="Menjalankan scraping data dan membuat draft artikel dari source yang dipilih." detailId="docs-generate" />
+              <HelpTooltip text="Membuat draft artikel dari source yang dipilih dengan mode Template gratis atau AI jika billing aktif." detailId="docs-generate" />
             </h2>
             <p className="mt-1 text-sm text-textSecondary">
-              Pilih portal, jenis konten, source, dan editor piket. Source mendukung multi-select checkbox.
+              Pilih portal, source, mode generate, dan editor piket. Template Mode gratis menjadi fallback utama sementara.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -981,7 +972,7 @@ function GenerateArticlePanel() {
               } disabled:cursor-not-allowed disabled:opacity-70`}
             >
               {generateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
-              Generate Artikel
+              {generateMode === "template" ? "Generate with Template" : "Generate with AI"}
             </button>
           </div>
         </div>
@@ -990,7 +981,7 @@ function GenerateArticlePanel() {
           <PortalControls />
         </div>
 
-        <div className="mt-5 grid gap-3 md:grid-cols-2">
+        <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_1fr_280px]">
           <label className="grid gap-2 text-sm font-semibold text-textPrimary">
             Triggered By
             <input
@@ -1012,6 +1003,38 @@ function GenerateArticlePanel() {
               placeholder="Nama editor reviewer"
             />
           </label>
+          <div className="grid gap-2 text-sm font-semibold text-textPrimary">
+            Generate Mode
+            <div className="grid grid-cols-2 rounded-lg border border-border bg-background p-1">
+              {[
+                { value: "template" as const, label: "Template", note: "gratis" },
+                { value: "ai" as const, label: "AI", note: "OpenAI" }
+              ].map((item) => (
+                <button
+                  key={item.value}
+                  type="button"
+                  onClick={() => setGenerateMode(item.value)}
+                  className={`rounded-md px-3 py-2 text-left text-sm font-semibold transition ${
+                    generateMode === item.value ? "bg-accentRed text-white shadow-sm" : "text-textSecondary hover:bg-surface"
+                  }`}
+                >
+                  <span className="block">{item.label}</span>
+                  <span className={`block text-xs ${generateMode === item.value ? "text-white/80" : "text-textSecondary"}`}>{item.note}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-lg border border-border bg-background p-4 text-sm text-textSecondary">
+          <p className="font-semibold text-textPrimary">
+            Mode aktif: {generateMode === "template" ? "Generate with Template" : "Generate with AI"}
+          </p>
+          <p className="mt-1">
+            {generateMode === "template"
+              ? "Template Mode tidak memakai OpenAI API dan tetap membuat draft newsroom friendly dari snapshot source."
+              : "AI Mode memakai OPENAI_API_KEY. Jika billing/token belum aktif, sistem akan memberi warning dan editor bisa kembali ke Template Mode."}
+          </p>
         </div>
 
         {!canGenerate && (
@@ -1035,7 +1058,7 @@ function GenerateArticlePanel() {
           <table className="w-full min-w-[1180px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-border bg-background text-left text-textSecondary">
-                <th className="px-3 py-3 font-semibold">Jenis Konten</th>
+                <th className="px-3 py-3 font-semibold">Context</th>
                 <th className="px-3 py-3 font-semibold">Portal</th>
                 <th className="px-3 py-3 font-semibold">Judul Artikel</th>
                 <th className="px-3 py-3 font-semibold">Date</th>
@@ -1309,7 +1332,6 @@ function ValidationTable() {
 
 function DataHargaEmasPanel() {
   const portal = useDashboardStore((state) => state.portal);
-  const jenisKonten = useDashboardStore((state) => state.jenisKonten);
   const selectedSources = useDashboardStore((state) => state.selectedSources);
   const snapshots = useDashboardStore((state) => state.snapshots);
   const setSnapshots = useDashboardStore((state) => state.setSnapshots);
@@ -1335,7 +1357,7 @@ function DataHargaEmasPanel() {
       const response = await fetch("/api/run-data", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ portal, jenisKonten, sources: selectedSources })
+        body: JSON.stringify({ portal, jenisKonten: SOURCE_BASED_CONTENT_LABEL, sources: selectedSources })
       });
       const data = (await response.json()) as RunDataResponse;
       if (!response.ok) throw data;
@@ -1576,7 +1598,7 @@ const documentationSections: DocSection[] = [
     id: "docs-cara-pakai",
     title: "Cara Menggunakan Dashboard",
     body: [
-      "Flow sederhana: buka Generate Artikel, pilih portal, pilih jenis konten, centang source, klik Run Data, lalu klik Generate Artikel jika artikel diperlukan.",
+      "Flow sederhana: buka Generate Artikel, pilih portal, centang source, pilih mode generate, klik Run Data, lalu klik Generate Artikel jika artikel diperlukan.",
       "Jika editor hanya butuh tabel harga untuk pengecekan, proses berhenti setelah Run Data."
     ],
     callouts: [{ label: "Tips", text: "Centang beberapa source untuk artikel multi-source, atau kosongkan pilihan agar semua source aktif digunakan.", kind: "tips" }]
@@ -1594,19 +1616,19 @@ const documentationSections: DocSection[] = [
     title: "Generate Artikel",
     body: [
       "Generate artikel wajib memilih portal terlebih dahulu karena gaya tulisan Beritasatu dan Investor Daily tidak dicampur.",
-      "Jenis konten menentukan template artikel. Source menentukan data yang digunakan untuk narasi dan daftar harga.",
-      "Jika kombinasi source tidak memiliki template exact, sistem tetap membuat artikel memakai template default paling mendekati.",
+      "Source dan bentuk data menentukan konteks artikel. Template Mode gratis membuat narasi sederhana tanpa OpenAI API.",
+      "AI Mode memakai OPENAI_API_KEY dan hanya digunakan saat editor memilih mode tersebut secara manual.",
       "Draft masuk ke tabel review dan dapat diedit lewat tombol Edit Draft."
     ],
-    callouts: [{ label: "Catatan", text: "Jika data belum berhasil di-run, tombol generate akan memberi warning dan proses diblokir.", kind: "catatan" }]
+    callouts: [{ label: "Catatan", text: "Jika AI belum aktif atau billing belum siap, gunakan Generate with Template sementara.", kind: "catatan" }]
   },
   {
     id: "docs-jenis-konten",
-    title: "Jenis Konten",
+    title: "Source + Data Shape",
     body: [
-      "Harga Emas Dunia menggunakan template market/global: pembukaan kondisi global, harga spot emas, dan sentimen pasar.",
-      "Harga Emas Antam menggunakan template harga harian: harga terbaru, perbandingan kemarin, dan list harga per gram.",
-      "Harga Emas ANTAM, UBS, Galeri 24 menggunakan template perbandingan multi-source untuk membantu editor melihat variasi harga antar penyedia."
+      "Generate artikel tidak lagi bergantung pada template picker manual.",
+      "Sistem membaca nama source, kolom data, daftar harga, delta, dan timestamp untuk menyusun konteks draft.",
+      "Portal hanya menentukan tone: Beritasatu lebih ringkas, Investor Daily lebih analitis."
     ]
   },
   {
@@ -1752,7 +1774,7 @@ function Dashboard() {
                 <p className="text-sm font-bold uppercase text-accentRed">Editorial Automation</p>
                 <h1 className="mt-2 text-2xl font-bold text-textPrimary">Dashboard Harga Emas & Perak</h1>
                 <p className="mt-2 max-w-3xl text-sm leading-6 text-textSecondary">
-                  Pilih portal, jenis konten, source, lalu jalankan Run Data atau Generate Artikel dari satu workflow draft editorial.
+                  Pilih portal, source, dan mode generate, lalu jalankan Run Data atau Generate Artikel dari satu workflow draft editorial.
                 </p>
               </div>
               <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">

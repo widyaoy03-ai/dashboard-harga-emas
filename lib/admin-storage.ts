@@ -405,9 +405,24 @@ export async function upsertAdminSource(input: AdminSourceInput) {
 
 export async function getRuntimeSourcesForContent(portal: Portal, jenisKonten: string) {
   const adminSources = await getAdminSources();
-  return adminSources
+  const exactSources = adminSources
     .filter((source) => source.is_active)
     .filter((source) => source.content_mapping.some((mapping) => mapping.portal === portal && mapping.jenis_konten === jenisKonten))
+    .map(adminSourceToConfig);
+
+  if (exactSources.length > 0) return exactSources;
+
+  return adminSources
+    .filter((source) => source.is_active)
+    .filter((source) => source.content_mapping.length === 0 || source.content_mapping.some((mapping) => mapping.portal === portal))
+    .map(adminSourceToConfig);
+}
+
+export async function getRuntimeSourcesForPortal(portal: Portal) {
+  const adminSources = await getAdminSources();
+  return adminSources
+    .filter((source) => source.is_active)
+    .filter((source) => source.content_mapping.length === 0 || source.content_mapping.some((mapping) => mapping.portal === portal))
     .map(adminSourceToConfig);
 }
 

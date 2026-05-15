@@ -195,8 +195,11 @@ export interface GeneratedArticle {
   disclaimer?: string;
 }
 
+export type GenerateMode = "template" | "ai";
+
 export interface GenerateArticleResponse {
   ok: boolean;
+  mode?: GenerateMode;
   article?: GeneratedArticle;
   draft?: ArticleDraftRecord;
   notifications: DashboardNotification[];

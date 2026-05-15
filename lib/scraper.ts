@@ -486,7 +486,9 @@ function extractLogamMuliaSectionRows(
 }
 
 function targetLogamMuliaSectionsForContent(jenisKonten: string): LogamMuliaProductSection[] {
-  if (jenisKonten.toLowerCase().includes("perak")) return ["Perak Murni"];
+  const lower = jenisKonten.toLowerCase();
+  if (lower.includes("source-based") || lower.includes("emas/perak")) return ["Emas Batangan", "Perak Murni"];
+  if (lower.includes("perak")) return ["Perak Murni"];
   return ["Emas Batangan"];
 }
 
@@ -1159,7 +1161,7 @@ export async function runData(portal: Portal, jenisKonten: string, selectedSourc
           id: crypto.randomUUID(),
           kind: "warning" as const,
           title: "Source belum tersedia",
-          message: "Source yang dipilih belum terhubung dengan jenis konten ini."
+          message: "Source yang dipilih belum aktif atau belum terhubung dengan portal ini."
         }
       ],
       partialFailure: false
