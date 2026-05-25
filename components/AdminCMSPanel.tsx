@@ -59,10 +59,15 @@ type SourcePreviewResponse = {
       htmlSize: number;
       elapsedMs: number;
       attempts: number;
+      runtime?: "nodejs";
+      fetchMethod?: "global-fetch-undici" | "https-request-scoped-ca";
       contentType?: string | null;
+      responseHeaders?: Record<string, string>;
       blockedHint?: string | null;
       errorName?: string | null;
       errorMessage?: string | null;
+      tlsStatus?: "passed" | "failed" | "unknown";
+      sslValidationResult?: string | null;
       sampleHtml?: string;
     } | null;
     debug?: {
@@ -1020,11 +1025,25 @@ export function AdminCMSPanel() {
                   {sourcePreview.fetch && (
                     <div className="mt-3 grid gap-1 rounded-lg border border-border bg-background p-3 text-xs text-textSecondary">
                       <p className="font-bold text-textPrimary">Debug Fetch Backend</p>
+                      <p>Runtime: {sourcePreview.fetch.runtime ?? "nodejs"} | Method: {sourcePreview.fetch.fetchMethod ?? "global-fetch-undici"}</p>
                       <p>Status: HTTP {sourcePreview.fetch.status || "-"} {sourcePreview.fetch.statusText ?? ""} | Size: {sourcePreview.fetch.htmlSize} karakter | {sourcePreview.fetch.elapsedMs} ms</p>
                       <p>Final URL: {sourcePreview.fetch.finalUrl}</p>
                       <p>Content-Type: {sourcePreview.fetch.contentType ?? "-"}</p>
+                      <p>TLS status: {sourcePreview.fetch.tlsStatus ?? "unknown"} {sourcePreview.fetch.sslValidationResult ? `| ${sourcePreview.fetch.sslValidationResult}` : ""}</p>
                       {sourcePreview.fetch.blockedHint && <p className="font-semibold text-amber-700">Blocked hint: {sourcePreview.fetch.blockedHint}</p>}
                       {sourcePreview.fetch.errorMessage && <p className="font-semibold text-red-700">Error: {sourcePreview.fetch.errorName ?? "FetchError"} - {sourcePreview.fetch.errorMessage}</p>}
+                      {sourcePreview.fetch.responseHeaders && Object.keys(sourcePreview.fetch.responseHeaders).length > 0 && (
+                        <details className="mt-1 rounded-md border border-border bg-surface p-2">
+                          <summary className="cursor-pointer font-semibold text-textPrimary">Response Headers</summary>
+                          <div className="mt-1 max-h-28 overflow-auto space-y-0.5">
+                            {Object.entries(sourcePreview.fetch.responseHeaders).map(([key, value]) => (
+                              <p key={key}>
+                                {key}: {value}
+                              </p>
+                            ))}
+                          </div>
+                        </details>
+                      )}
                     </div>
                   )}
                   {sourcePreview.debug && (

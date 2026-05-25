@@ -1,5 +1,9 @@
+import * as https from "node:https";
+import type { IncomingHttpHeaders } from "node:http";
+import * as tls from "node:tls";
 import { queryHtmlRows, queryHtmlSelections } from "./html-selector";
 import { getRuntimeSourcesForContent } from "./admin-storage";
+import { sectigoRsaDomainValidationSecureServerCaPem } from "./certificates";
 import { buildSourceDataViews } from "./source-data-view";
 import { findPreviousSnapshot, saveSnapshots } from "./storage";
 import type { DashboardNotification, GoldPriceRow, GoldPriceSnapshot, Portal, SourceConfig } from "./types";
@@ -15,10 +19,15 @@ type FetchDiagnostics = {
   htmlSize: number;
   elapsedMs: number;
   attempts: number;
+  runtime: "nodejs";
+  fetchMethod: "global-fetch-undici" | "https-request-scoped-ca";
   contentType?: string | null;
+  responseHeaders?: Record<string, string>;
   blockedHint?: string | null;
   errorName?: string | null;
   errorMessage?: string | null;
+  tlsStatus?: "passed" | "failed" | "unknown";
+  sslValidationResult?: string | null;
   sampleHtml?: string;
 };
 
@@ -49,6 +58,103 @@ function blockedHintFromHtml(html: string, status: number) {
   }
   if (html && html.length < 200) return "Response terlalu pendek sehingga kemungkinan kosong/truncated.";
   return null;
+}
+
+type HostScopedTlsConfig = {
+  name: string;
+  extraCaPem: string;
+  hosts: string[];
+};
+
+const hostScopedTlsConfigs: HostScopedTlsConfig[] = [
+  {
+    name: "laku-emas-sectigo-chain",
+    extraCaPem: sectigoRsaDomainValidationSecureServerCaPem,
+    hosts: ["www.lakuemas.com", "lakuemas.com"]
+  }
+];
+
+type ScopedHttpsResponse = {
+  status: number;
+  statusText: string;
+  finalUrl: string;
+  body: string;
+  headers: Record<string, string>;
+};
+
+function scopedTlsConfigForUrl(url: string) {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return hostScopedTlsConfigs.find((item) => item.hosts.includes(hostname)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeNodeHeaders(headers: IncomingHttpHeaders) {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) normalized[key.toLowerCase()] = value.join(", ");
+    else if (typeof value === "string") normalized[key.toLowerCase()] = value;
+  }
+  return normalized;
+}
+
+async function requestWithScopedTls(
+  url: string,
+  headers: HeadersInit,
+  timeoutMs: number,
+  tlsConfig: HostScopedTlsConfig,
+  redirectCount = 0
+): Promise<ScopedHttpsResponse> {
+  const parsedUrl = new URL(url);
+  const caChain = [...tls.rootCertificates, tlsConfig.extraCaPem];
+  const agent = new https.Agent({
+    ca: caChain,
+    rejectUnauthorized: true,
+    servername: parsedUrl.hostname
+  });
+  const headerObject = Object.entries(headers as Record<string, string>).reduce<Record<string, string>>((acc, [key, value]) => {
+    if (typeof value === "string") acc[key] = value;
+    return acc;
+  }, {});
+
+  const response = await new Promise<ScopedHttpsResponse>((resolve, reject) => {
+    const req = https.request(
+      url,
+      {
+        method: "GET",
+        headers: headerObject,
+        agent
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode ?? 0,
+            statusText: res.statusMessage ?? "",
+            finalUrl: url,
+            body: Buffer.concat(chunks).toString("utf8"),
+            headers: normalizeNodeHeaders(res.headers)
+          });
+        });
+      }
+    );
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error("Request timeout."));
+    });
+    req.end();
+  });
+
+  const location = response.headers.location;
+  if (location && response.status >= 300 && response.status < 400 && redirectCount < 3) {
+    const nextUrl = new URL(location, url).toString();
+    return requestWithScopedTls(nextUrl, headers, timeoutMs, tlsConfig, redirectCount + 1);
+  }
+
+  return response;
 }
 
 function todayJakarta() {
@@ -778,36 +884,69 @@ function applyHistoricalComparison(rows: GoldPriceRow[], previous: GoldPriceSnap
 async function fetchHtml(url: string, maxAttempts = 2) {
   let lastError: unknown = null;
   let lastDiagnostics: FetchDiagnostics | null = null;
+  const scopedTlsConfig = scopedTlsConfigForUrl(url);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const startedAt = Date.now();
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000);
+    const headers = browserLikeHeaders(url, attempt);
     try {
-      const response = await fetch(url, {
-        headers: browserLikeHeaders(url, attempt),
-        redirect: "follow",
-        signal: controller.signal,
-        cache: "no-store"
-      });
+      const response = scopedTlsConfig
+        ? await requestWithScopedTls(url, headers, 25000, scopedTlsConfig)
+        : await (async () => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 25000);
+            try {
+              const fetched = await fetch(url, {
+                headers,
+                redirect: "follow",
+                signal: controller.signal,
+                cache: "no-store"
+              });
+              const html = await fetched.text();
+              const responseHeaders: Record<string, string> = {};
+              fetched.headers.forEach((value, key) => {
+                responseHeaders[key] = value;
+              });
+              return {
+                status: fetched.status,
+                statusText: fetched.statusText,
+                finalUrl: fetched.url,
+                body: html,
+                headers: responseHeaders
+              };
+            } finally {
+              clearTimeout(timeout);
+            }
+          })();
 
-      const html = await response.text();
+      const html = response.body;
+      const responseHeaders = response.headers;
+      const ok = response.status >= 200 && response.status < 300;
       lastDiagnostics = {
-        ok: response.ok,
+        ok,
         status: response.status,
         statusText: response.statusText,
-        finalUrl: response.url,
+        finalUrl: response.finalUrl,
         htmlSize: html.length,
         elapsedMs: Date.now() - startedAt,
         attempts: attempt,
-        contentType: response.headers.get("content-type"),
+        runtime: "nodejs",
+        fetchMethod: scopedTlsConfig ? "https-request-scoped-ca" : "global-fetch-undici",
+        contentType: responseHeaders["content-type"] ?? null,
+        responseHeaders,
         blockedHint: blockedHintFromHtml(html, response.status),
         errorName: null,
         errorMessage: null,
+        tlsStatus: response.finalUrl.startsWith("https://") ? "passed" : "unknown",
+        sslValidationResult: response.finalUrl.startsWith("https://")
+          ? scopedTlsConfig
+            ? `TLS certificate verified with scoped CA (${scopedTlsConfig.name})`
+            : "TLS certificate verified"
+          : null,
         sampleHtml: html.slice(0, 500)
       };
-      if (response.ok || attempt === maxAttempts) {
-        return { ok: response.ok, status: response.status, statusText: response.statusText, finalUrl: response.url, html, diagnostics: lastDiagnostics };
+      if (ok || attempt === maxAttempts) {
+        return { ok, status: response.status, statusText: response.statusText, finalUrl: response.finalUrl, html, diagnostics: lastDiagnostics };
       }
       console.warn(`[scraper] Fetch ${url} returned HTTP ${response.status}. Retry ${attempt}/${maxAttempts}.`);
     } catch (error) {
@@ -822,6 +961,8 @@ async function fetchHtml(url: string, maxAttempts = 2) {
           : "";
       const baseErrorMessage = error instanceof Error ? error.message : "Fetch source gagal.";
       const errorMessage = causeMessage ? `${baseErrorMessage} (${causeMessage})` : baseErrorMessage;
+      const sslValidationResult = causeMessage || baseErrorMessage;
+      const tlsStatus = /verify|certificate|tls|ssl|unable_to_verify_leaf_signature|unable_to_get_issuer/i.test(sslValidationResult) ? "failed" : "unknown";
       lastDiagnostics = {
         ok: false,
         status: 0,
@@ -829,16 +970,19 @@ async function fetchHtml(url: string, maxAttempts = 2) {
         htmlSize: 0,
         elapsedMs: Date.now() - startedAt,
         attempts: attempt,
+        runtime: "nodejs",
+        fetchMethod: scopedTlsConfig ? "https-request-scoped-ca" : "global-fetch-undici",
         contentType: null,
+        responseHeaders: {},
         blockedHint: errorName === "AbortError" ? "Request timeout." : null,
         errorName,
         errorMessage,
+        tlsStatus,
+        sslValidationResult,
         sampleHtml: ""
       };
       console.warn(`[scraper] Fetch ${url} failed on attempt ${attempt}/${maxAttempts}.`, error);
       if (attempt === maxAttempts) break;
-    } finally {
-      clearTimeout(timeout);
     }
     await wait(600 * attempt);
   }
@@ -857,10 +1001,15 @@ async function fetchHtml(url: string, maxAttempts = 2) {
         htmlSize: 0,
         elapsedMs: 0,
         attempts: maxAttempts,
+        runtime: "nodejs",
+        fetchMethod: "global-fetch-undici",
         contentType: null,
+        responseHeaders: {},
         blockedHint: null,
         errorName: lastError instanceof Error ? lastError.name : "UnknownError",
         errorMessage: lastError instanceof Error ? lastError.message : "Fetch source gagal.",
+        tlsStatus: "unknown",
+        sslValidationResult: null,
         sampleHtml: ""
       }
   };
@@ -933,6 +1082,15 @@ function fetchFailureMessage(sourceName: string, fetched: Awaited<ReturnType<typ
     return `Source ${sourceName} merespons, tetapi HTML kosong/terlalu pendek (${diagnostics?.htmlSize ?? fetched.html.length} karakter).`;
   }
   return `Source ${sourceName} sedang tidak dapat diakses.`;
+}
+
+function shouldFallbackManualByTls(source: SourceConfig, fetched: Awaited<ReturnType<typeof fetchHtml>>) {
+  if (!isLakuEmasParser(source)) return false;
+  const detail = `${fetched.diagnostics.errorMessage ?? ""} ${fetched.diagnostics.sslValidationResult ?? ""}`.toLowerCase();
+  return (
+    fetched.diagnostics.tlsStatus === "failed" ||
+    /unable_to_verify_leaf_signature|unable to verify the first certificate|unable_to_get_issuer_cert/i.test(detail)
+  );
 }
 
 function createLogamMuliaSourceConfig(url: string): SourceConfig {
@@ -1070,6 +1228,14 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
     const lakuContext = isLakuEmasParser(source) ? await fetchLakuEmasPerhiasanContext(source, 3) : null;
     const fetched = lakuContext?.fetched ?? (await fetchHtml(source.url, 3));
     if (!fetched.ok || fetched.html.length < 200) {
+      if (shouldFallbackManualByTls(source, fetched)) {
+        return {
+          ...base,
+          id: crypto.randomUUID(),
+          status: "manual",
+          catatan: `Source ${source.name} fallback ke input manual sementara karena verifikasi TLS gagal (${fetched.diagnostics.errorMessage ?? "unknown TLS error"}).`
+        };
+      }
       return {
         ...base,
         id: crypto.randomUUID(),
@@ -1285,8 +1451,13 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
         htmlSize: 0,
         elapsedMs: 0,
         attempts: 0,
+        runtime: "nodejs",
+        fetchMethod: "global-fetch-undici",
+        responseHeaders: {},
         errorName: error instanceof Error ? error.name : "UnknownError",
-        errorMessage: error instanceof Error ? error.message : "Preview gagal karena kesalahan sistem."
+        errorMessage: error instanceof Error ? error.message : "Preview gagal karena kesalahan sistem.",
+        tlsStatus: "unknown",
+        sslValidationResult: null
       },
       debug: undefined,
       message: error instanceof Error ? `Preview gagal: ${error.message}` : "Preview gagal karena kesalahan sistem."
