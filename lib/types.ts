@@ -6,7 +6,7 @@ export type SourceRunStatus = "success" | "warning" | "error" | "manual";
 
 export type SourceName = string;
 
-export type SourceParserType = "generic-table" | "logam-mulia";
+export type SourceParserType = "generic-table" | "logam-mulia" | "raja-emas";
 
 export interface SourceFieldMapping {
   weightIndex?: number;

@@ -101,7 +101,9 @@ function ensureMemorySeeded() {
 function selectorConfigFromSource(source: SourceConfig) {
   return {
     selectorSummary: source.selectorSummary,
-    parserType: source.parserType ?? (source.name === "Logam Mulia" ? "logam-mulia" : "generic-table"),
+    parserType:
+      source.parserType ??
+      (source.name === "Logam Mulia" ? "logam-mulia" : source.name === "Raja Emas" ? "raja-emas" : "generic-table"),
     titleSelector: source.titleSelector ?? "",
     dataSelector: source.dataSelector ?? "",
     rowSelector: source.rowSelector ?? "",
@@ -126,7 +128,12 @@ function sourceRecordFromRow(row: Record<string, unknown>): AdminSourceRecord {
     mode: row.mode === "manual" ? "manual" : "otomatis",
     group,
     selectorSummary: String(selectorConfig.selectorSummary ?? ""),
-    parserType: selectorConfig.parserType === "logam-mulia" ? "logam-mulia" : "generic-table",
+    parserType:
+      selectorConfig.parserType === "logam-mulia"
+        ? "logam-mulia"
+        : selectorConfig.parserType === "raja-emas"
+          ? "raja-emas"
+          : "generic-table",
     titleSelector: selectorConfig.titleSelector ? String(selectorConfig.titleSelector) : undefined,
     dataSelector: selectorConfig.dataSelector ? String(selectorConfig.dataSelector) : undefined,
     rowSelector: selectorConfig.rowSelector ? String(selectorConfig.rowSelector) : undefined,

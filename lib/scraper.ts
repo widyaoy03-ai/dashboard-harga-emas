@@ -283,8 +283,8 @@ function createPriceRow(
     jenis_emas: jenisEmas,
     product_type: meta.product_type ?? sectionName ?? jenisEmas,
     weight: meta.weight ?? berat,
-    base_price: meta.base_price ?? priceNumber(harga ?? undefined, source.priceCurrency),
-    price_pph_025: meta.price_pph_025 ?? null,
+    base_price: meta.base_price !== undefined ? meta.base_price : priceNumber(harga ?? undefined, source.priceCurrency),
+    price_pph_025: meta.price_pph_025 !== undefined ? meta.price_pph_025 : null,
     source: meta.source ?? source.name,
     scraped_at: meta.scraped_at ?? updateTime ?? nowIso(),
     section_name: sectionName ?? null,
@@ -512,6 +512,93 @@ function rowsFromLogamMuliaSections(source: SourceConfig, jenisKonten: string, h
   return parseLogamMuliaSections(source, jenisKonten, html, text).rows;
 }
 
+type RajaEmasSkippedRow = {
+  reason: string;
+  sample: string;
+};
+
+function isRajaEmasParser(source: SourceConfig) {
+  return source.parserType === "raja-emas" || source.name.toLowerCase().includes("raja emas");
+}
+
+function isRajaKaratLabel(value: string) {
+  const compact = value.replace(/\s+/g, "").toUpperCase();
+  const match = compact.match(/^K(\d{1,2})\*?$/);
+  if (!match) return false;
+  const karat = Number(match[1]);
+  return Number.isFinite(karat) && karat >= 5 && karat <= 24;
+}
+
+function parseRajaEmasRows(source: SourceConfig, html: string, text: string) {
+  const updateTime = findTimestamp(text);
+  const selector = configuredRowSelector(source) ?? "table tr";
+  const rowSelections = tableRowSelectionsFromHtml(html, selector);
+  const rows: GoldPriceRow[] = [];
+  const skippedRows: RajaEmasSkippedRow[] = [];
+  let headerFound = false;
+  let capturing = false;
+  let ignoredTextCount = 0;
+
+  const trackSkip = (reason: string, sample: string) => {
+    if (skippedRows.length < 20) skippedRows.push({ reason, sample: sample.slice(0, 220) });
+    if (reason.toLowerCase().includes("teks") || reason.toLowerCase().includes("non")) ignoredTextCount += 1;
+  };
+
+  for (const rowSelection of rowSelections) {
+    const cells = rowSelection.cells.map((cell) => cell.replace(/\s+/g, " ").trim()).filter(Boolean);
+    if (!cells.length) continue;
+    const rowText = cells.join(" | ");
+
+    if (!headerFound && /kadar\s*karat/i.test(rowText) && /harga\s*per\s*gram/i.test(rowText)) {
+      headerFound = true;
+      capturing = true;
+      continue;
+    }
+
+    if (!capturing) continue;
+    if (/jenis\s*logam\s*mulia|lokasi\s*kami|bandingkan\s+dengan\s+tempat\s+lain/i.test(rowText)) {
+      break;
+    }
+
+    if (cells.length < 2) {
+      trackSkip("kolom kurang dari 2", rowText);
+      continue;
+    }
+
+    const kadarKarat = cells[0];
+    const hargaPerGram = cleanPrice(cells[1], source.priceCurrency);
+    if (!isRajaKaratLabel(kadarKarat)) {
+      trackSkip("row non-karat/teks diabaikan", rowText);
+      continue;
+    }
+    if (!hargaPerGram || !/rp/i.test(hargaPerGram)) {
+      trackSkip("harga per gram tidak valid", rowText);
+      continue;
+    }
+
+    rows.push(
+      createPriceRow(source, "Emas perhiasan", kadarKarat, hargaPerGram, null, updateTime, "Harga Perhiasan", {
+        product_type: "Kadar Karat",
+        weight: kadarKarat,
+        base_price: null,
+        price_pph_025: null,
+        source: source.name,
+        scraped_at: updateTime ?? nowIso()
+      })
+    );
+  }
+
+  return {
+    selectorUsed: selector,
+    rowSelectionsCount: rowSelections.length,
+    rows: dedupeRows(rows).slice(0, 40),
+    validRows: rows.length,
+    headerFound,
+    ignoredTextCount,
+    skippedRows
+  };
+}
+
 function rowsFromTextLines(source: SourceConfig, jenisEmas: string, text: string, updateTime: string | null) {
   const rows: GoldPriceRow[] = [];
   const lines = text
@@ -549,6 +636,10 @@ function extractPriceRows(source: SourceConfig, jenisKonten: string, html: strin
     return rowsFromLogamMuliaSections(source, jenisKonten, html, text);
   }
 
+  if (isRajaEmasParser(source)) {
+    return parseRajaEmasRows(source, html, text).rows;
+  }
+
   if (source.priceCurrency === "USD") {
     const prices = priceCandidates(text, "USD");
     return prices.length ? [createPriceRow(source, jenisEmas, "1 ons troi", prices[0], null, updateTime)] : [];
@@ -558,7 +649,7 @@ function extractPriceRows(source: SourceConfig, jenisKonten: string, html: strin
   const scopedText = selector ? scopedTextFromSelector(html, selector, text) : text;
   const tableRows = rowsFromHtmlTables(source, jenisEmas, html, updateTime);
 
-  const textRows = rowsFromTextLines(source, jenisEmas, scopedText, updateTime);
+  const textRows = tableRows.length ? [] : rowsFromTextLines(source, jenisEmas, scopedText, updateTime);
   const rows = dedupeRows([...tableRows, ...textRows]);
 
   if (rows.length) return rows.slice(0, 80);
@@ -849,6 +940,7 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
 
     const rows = extractPriceRows(source, jenisKonten, fetched.html, visibleText);
     if (!rows.length) {
+      const rajaDebug = isRajaEmasParser(source) ? parseRajaEmasRows(source, fetched.html, visibleText) : null;
       const logamDebug =
         source.parserType === "logam-mulia" || source.name === "Logam Mulia"
           ? parseLogamMuliaSections(source, jenisKonten, fetched.html, visibleText)
@@ -859,7 +951,9 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
         status: "error",
         catatan: logamDebug
           ? `Data harga dari ${source.name} tidak dapat diparse. HTTP ${fetched.status}, HTML ${fetched.diagnostics.htmlSize} karakter, selector ${configuredRowSelector(source) ?? "-"}, section ditemukan: ${logamDebug.foundSections.join(", ") || "-"}, row valid: ${logamDebug.rows.length}, row di-skip: ${logamDebug.invalidRowsSkipped}.`
-          : `Data harga dari ${source.name} tidak dapat diparse. HTTP ${fetched.status}, HTML ${fetched.diagnostics.htmlSize} karakter, selector ${configuredRowSelector(source) ?? "-"}.`
+          : rajaDebug
+            ? `Data harga dari ${source.name} tidak dapat diparse. HTTP ${fetched.status}, HTML ${fetched.diagnostics.htmlSize} karakter, selector ${rajaDebug.selectorUsed}, header tabel ditemukan: ${rajaDebug.headerFound ? "Ya" : "Tidak"}, row selector: ${rajaDebug.rowSelectionsCount}, row valid: ${rajaDebug.validRows}, text diabaikan: ${rajaDebug.ignoredTextCount}.`
+            : `Data harga dari ${source.name} tidak dapat diparse. HTTP ${fetched.status}, HTML ${fetched.diagnostics.htmlSize} karakter, selector ${configuredRowSelector(source) ?? "-"}.`
       };
     }
 
@@ -930,6 +1024,7 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
     const visibleText = stripTags(fetched.html);
     const candidateRows = selector ? tableRowsFromHtml(fetched.html, selector).length : tableRowsFromHtml(fetched.html).length;
     const rows = extractPriceRows(source, jenisKonten, fetched.html, visibleText);
+    const rajaEmasDebug = isRajaEmasParser(source) ? parseRajaEmasRows(source, fetched.html, visibleText) : null;
     const logamMuliaDebug =
       source.parserType === "logam-mulia" || source.name === "Logam Mulia"
         ? parseLogamMuliaSections(source, jenisKonten, fetched.html, visibleText)
@@ -951,9 +1046,24 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
             validRows: logamMuliaDebug.rows.length,
             skippedRows: logamMuliaDebug.invalidRowsSkipped,
             skippedSamples: logamMuliaDebug.skippedRows,
-            stoppedAtSection: logamMuliaDebug.stoppedAtSection
+            stoppedAtSection: logamMuliaDebug.stoppedAtSection,
+            rawSelectorCount: candidateRows
           }
-        : undefined,
+        : rajaEmasDebug
+          ? {
+              parser: "raja-emas-karat-table",
+              validRows: rajaEmasDebug.validRows,
+              skippedRows: rajaEmasDebug.skippedRows.length,
+              skippedSamples: rajaEmasDebug.skippedRows.map((item) => ({
+                section: "Harga Emas Perhiasan",
+                reason: item.reason,
+                sample: item.sample
+              })),
+              rawSelectorCount: rajaEmasDebug.rowSelectionsCount,
+              ignoredTextCount: rajaEmasDebug.ignoredTextCount,
+              headerFound: rajaEmasDebug.headerFound
+            }
+          : undefined,
       message: rows.length
         ? `Preview menemukan ${rows.length} data valid dari ${candidateRows} row.`
         : `Selector berhasil dijalankan, tetapi tidak ada data harga valid dari ${candidateRows} row.`
@@ -1000,6 +1110,7 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
   let sampleHtml = "";
   let sampleParsedRow: GoldPriceRow | null = null;
   let logamMuliaDebug: ReturnType<typeof parseLogamMuliaSections> | null = null;
+  let rajaEmasDebug: ReturnType<typeof parseRajaEmasRows> | null = null;
   let fetchDiagnostics: FetchDiagnostics | null = null;
 
   const invalidResult = () => ({
@@ -1023,6 +1134,9 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
       skippedRows: logamMuliaDebug?.invalidRowsSkipped ?? 0,
       skippedSamples: logamMuliaDebug?.skippedRows ?? [],
       stoppedAtSection: logamMuliaDebug?.stoppedAtSection ?? null,
+      rawSelectorCount: rajaEmasDebug?.rowSelectionsCount ?? rowCount,
+      ignoredTextCount: rajaEmasDebug?.ignoredTextCount ?? 0,
+      headerFound: rajaEmasDebug?.headerFound ?? false,
       checkedAt
     },
     rows: [] as GoldPriceRow[]
@@ -1069,19 +1183,22 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
     checks.rowFound = rowCount > 0;
 
     const visibleText = stripTags(fetched.html);
+    rajaEmasDebug = isRajaEmasParser(source) ? parseRajaEmasRows(source, fetched.html, visibleText) : null;
     logamMuliaDebug =
       source.parserType === "logam-mulia" || source.name === "Logam Mulia"
         ? parseLogamMuliaSections(source, jenisKonten, fetched.html, visibleText)
         : null;
-    const rows = logamMuliaDebug ? logamMuliaDebug.rows : extractPriceRows(source, jenisKonten, fetched.html, visibleText);
+    const rows = logamMuliaDebug ? logamMuliaDebug.rows : rajaEmasDebug ? rajaEmasDebug.rows : extractPriceRows(source, jenisKonten, fetched.html, visibleText);
     validDataCount = rows.length;
     checks.dataParsed = validDataCount > 0;
     sampleParsedRow = rows[0] ?? null;
-    checks.fieldMappingValid = Boolean(
-      sampleParsedRow?.weight &&
-        typeof sampleParsedRow.base_price === "number" &&
-        typeof sampleParsedRow.price_pph_025 === "number"
-    );
+    checks.fieldMappingValid = isRajaEmasParser(source)
+      ? Boolean(sampleParsedRow?.weight && sampleParsedRow?.harga && isRajaKaratLabel(sampleParsedRow.weight ?? sampleParsedRow.berat))
+      : Boolean(
+          sampleParsedRow?.weight &&
+            typeof sampleParsedRow.base_price === "number" &&
+            typeof sampleParsedRow.price_pph_025 === "number"
+        );
 
     if (!checks.selectorFound) {
       reasons.push("Selector tidak menemukan element apa pun di halaman source.");
@@ -1092,12 +1209,28 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
       recommendations.push("Pastikan selector mengarah ke tr, bukan container besar atau section teks.");
     }
     if (!checks.fieldMappingValid) {
-      reasons.push("Field mapping belum sesuai. Untuk Logam Mulia dibutuhkan td[0] berat, td[1] harga dasar, td[2] harga + Pajak PPh 0.25%.");
-      recommendations.push("Periksa mapping kolom: weightIndex=0, basePriceIndex=1, pricePph025Index=2.");
+      reasons.push(
+        isRajaEmasParser(source)
+          ? "Field mapping Raja Emas belum sesuai. Dibutuhkan td[0] kadar_karat dan td[1] harga_per_gram."
+          : "Field mapping belum sesuai. Untuk Logam Mulia dibutuhkan td[0] berat, td[1] harga dasar, td[2] harga + Pajak PPh 0.25%."
+      );
+      recommendations.push(
+        isRajaEmasParser(source)
+          ? "Periksa mapping kolom Raja Emas: weightIndex=0, priceIndex=1, parserType=raja-emas."
+          : "Periksa mapping kolom: weightIndex=0, basePriceIndex=1, pricePph025Index=2."
+      );
     }
     if (!checks.dataParsed) {
-      reasons.push("Data harga belum berhasil diparse dari row yang ditemukan.");
-      recommendations.push("Pastikan row berada di section yang benar: Emas Batangan atau Perak Murni.");
+      reasons.push(
+        isRajaEmasParser(source)
+          ? "Data Raja Emas belum berhasil diparse dari tabel Kadar Karat."
+          : "Data harga belum berhasil diparse dari row yang ditemukan."
+      );
+      recommendations.push(
+        isRajaEmasParser(source)
+          ? "Gunakan row selector yang mengarah ke tabel di bawah judul 'Harga Beli Emas Hari Ini di Raja Emas Indonesia'."
+          : "Pastikan row berada di section yang benar: Emas Batangan atau Perak Murni."
+      );
     }
 
     const ok =
@@ -1125,9 +1258,15 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
         sampleParsedRow,
         sectionsFound: logamMuliaDebug?.foundSections ?? [],
         ignoredSections: logamMuliaDebug?.ignoredSections ?? [],
-        skippedRows: logamMuliaDebug?.invalidRowsSkipped ?? 0,
-        skippedSamples: logamMuliaDebug?.skippedRows ?? [],
+        skippedRows: logamMuliaDebug?.invalidRowsSkipped ?? rajaEmasDebug?.skippedRows.length ?? 0,
+        skippedSamples:
+          logamMuliaDebug?.skippedRows ??
+          rajaEmasDebug?.skippedRows.map((item) => ({ section: "Harga Emas Perhiasan", reason: item.reason, sample: item.sample })) ??
+          [],
         stoppedAtSection: logamMuliaDebug?.stoppedAtSection ?? null,
+        rawSelectorCount: rajaEmasDebug?.rowSelectionsCount ?? rowCount,
+        ignoredTextCount: rajaEmasDebug?.ignoredTextCount ?? 0,
+        headerFound: rajaEmasDebug?.headerFound ?? false,
         checkedAt
       },
       rows: rows.slice(0, 40)

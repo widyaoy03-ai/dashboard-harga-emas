@@ -19,7 +19,7 @@ function isRajaEmasSource(sourceName: string) {
 function isLogamMuliaSnapshot(snapshot: GoldPriceSnapshot) {
   return (
     /logam\s*mulia/i.test(snapshot.source_name) ||
-    snapshot.price_rows.some((row) => hasValue(row.base_price) || hasValue(row.price_pph_025))
+    snapshot.price_rows.some((row) => hasValue(row.price_pph_025))
   );
 }
 
@@ -83,12 +83,12 @@ function buildSourceSpecificRows(snapshot: GoldPriceSnapshot) {
   }
 
   if (isRajaEmasSource(snapshot.source_name)) {
-    const columns = [textColumn("kadar", "Kadar"), priceColumn("price_per_gram", "Harga per Gram")];
+    const columns = [textColumn("kadar_karat", "Kadar Karat"), priceColumn("harga_per_gram", "Harga per Gram")];
     return {
       columns,
       rows: rows.map((row) => ({
-        kadar: row.weight ?? row.berat,
-        price_per_gram: row.harga
+        kadar_karat: row.weight ?? row.berat,
+        harga_per_gram: row.harga
       }))
     };
   }

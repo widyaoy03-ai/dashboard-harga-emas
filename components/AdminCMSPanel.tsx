@@ -73,6 +73,9 @@ type SourcePreviewResponse = {
       skippedRows?: number;
       skippedSamples?: Array<{ section: string | null; reason: string; sample: string }>;
       stoppedAtSection?: string | null;
+      rawSelectorCount?: number;
+      ignoredTextCount?: number;
+      headerFound?: boolean;
     };
     message: string;
   };
@@ -244,6 +247,7 @@ export function AdminCMSPanel() {
   const [sourcePreviewKey, setSourcePreviewKey] = useState("");
   const [sourceDocumentFile, setSourceDocumentFile] = useState<File | null>(null);
   const [sourceDocumentAudit, setSourceDocumentAudit] = useState<SourceDocumentValidationResponse | null>(null);
+  const isRajaPreview = (sourceForm.parserType ?? "generic-table") === "raja-emas" || /raja\s*emas/i.test(sourceForm.name);
 
   const mappings = useMemo(
     () =>
@@ -865,6 +869,7 @@ export function AdminCMSPanel() {
               >
                 <option value="generic-table">generic-table</option>
                 <option value="logam-mulia">logam-mulia</option>
+                <option value="raja-emas">raja-emas</option>
               </select>
               <input
                 value={sourceForm.selectorSummary}
@@ -1017,9 +1022,12 @@ export function AdminCMSPanel() {
                   )}
                   {sourcePreview.debug && (
                     <div className="mt-3 grid gap-2 rounded-lg border border-border bg-background p-3 text-xs text-textSecondary">
-                      <p className="font-bold text-textPrimary">Debug Logam Mulia</p>
+                      <p className="font-bold text-textPrimary">Debug Parser ({sourcePreview.debug.parser ?? "generic-table"})</p>
+                      <p>Raw selector result: {sourcePreview.debug.rawSelectorCount ?? sourcePreview.rowsFound}</p>
                       <p>Section ditemukan: {sourcePreview.debug.sectionsFound?.join(", ") || "-"}</p>
                       <p>Section diabaikan: {sourcePreview.debug.ignoredSections?.join(", ") || "-"}</p>
+                      {typeof sourcePreview.debug.ignoredTextCount === "number" && <p>Ignored text count: {sourcePreview.debug.ignoredTextCount}</p>}
+                      {typeof sourcePreview.debug.headerFound === "boolean" && <p>Header tabel ditemukan: {sourcePreview.debug.headerFound ? "Ya" : "Tidak"}</p>}
                       <p>Row valid: {sourcePreview.debug.validRows ?? sourcePreview.validRows} | Row di-skip: {sourcePreview.debug.skippedRows ?? 0}</p>
                       <p>Stop di section: {sourcePreview.debug.stoppedAtSection ?? "-"}</p>
                       {!!sourcePreview.debug.skippedSamples?.length && (
@@ -1035,24 +1043,42 @@ export function AdminCMSPanel() {
                     <table className="w-full min-w-[720px] border-collapse text-xs">
                       <thead>
                         <tr className="border-b border-border bg-background text-left text-textSecondary">
-                          <th className="px-2 py-2">Kategori</th>
-                          <th className="px-2 py-2">Berat</th>
-                          <th className="px-2 py-2 text-right">Harga Dasar</th>
-                          <th className="px-2 py-2 text-right">Harga + Pajak PPh 0.25%</th>
+                          {isRajaPreview ? (
+                            <>
+                              <th className="px-2 py-2">Kadar Karat</th>
+                              <th className="px-2 py-2 text-right">Harga per Gram</th>
+                            </>
+                          ) : (
+                            <>
+                              <th className="px-2 py-2">Kategori</th>
+                              <th className="px-2 py-2">Berat</th>
+                              <th className="px-2 py-2 text-right">Harga Dasar</th>
+                              <th className="px-2 py-2 text-right">Harga + Pajak PPh 0.25%</th>
+                            </>
+                          )}
                         </tr>
                       </thead>
                       <tbody>
                         {sourcePreview.rows.map((row) => (
                           <tr key={row.id} className="border-b border-border/60">
-                            <td className="px-2 py-2">{row.category ?? "-"}</td>
-                            <td className="px-2 py-2">{row.berat}</td>
-                            <td className="px-2 py-2 text-right font-semibold">{row.base_price?.toLocaleString("id-ID") ?? row.harga ?? "-"}</td>
-                            <td className="px-2 py-2 text-right font-semibold">{row.price_pph_025?.toLocaleString("id-ID") ?? "-"}</td>
+                            {isRajaPreview ? (
+                              <>
+                                <td className="px-2 py-2">{row.weight ?? row.berat}</td>
+                                <td className="px-2 py-2 text-right font-semibold">{row.harga ?? "-"}</td>
+                              </>
+                            ) : (
+                              <>
+                                <td className="px-2 py-2">{row.category ?? "-"}</td>
+                                <td className="px-2 py-2">{row.berat}</td>
+                                <td className="px-2 py-2 text-right font-semibold">{row.base_price?.toLocaleString("id-ID") ?? row.harga ?? "-"}</td>
+                                <td className="px-2 py-2 text-right font-semibold">{row.price_pph_025?.toLocaleString("id-ID") ?? "-"}</td>
+                              </>
+                            )}
                           </tr>
                         ))}
                         {!sourcePreview.rows.length && (
                           <tr>
-                            <td colSpan={4} className="px-2 py-5 text-center text-textSecondary">
+                            <td colSpan={isRajaPreview ? 2 : 4} className="px-2 py-5 text-center text-textSecondary">
                               Tidak ada row valid. Periksa row selector atau boundary keyword.
                             </td>
                           </tr>

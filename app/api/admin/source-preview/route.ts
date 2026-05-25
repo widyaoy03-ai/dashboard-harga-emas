@@ -10,7 +10,7 @@ const previewSchema = z.object({
   mode: z.enum(["otomatis", "manual"]),
   group: z.enum(["antam", "perak", "dunia", "perhiasan", "pegadaian", "digital", "emas-kecil", "manual"]),
   selectorSummary: z.string().optional().default(""),
-  parserType: z.enum(["generic-table", "logam-mulia"]).optional(),
+  parserType: z.enum(["generic-table", "logam-mulia", "raja-emas"]).optional(),
   titleSelector: z.string().optional(),
   dataSelector: z.string().optional(),
   rowSelector: z.string().optional(),
