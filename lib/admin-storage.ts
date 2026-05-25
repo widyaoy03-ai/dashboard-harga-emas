@@ -103,7 +103,13 @@ function selectorConfigFromSource(source: SourceConfig) {
     selectorSummary: source.selectorSummary,
     parserType:
       source.parserType ??
-      (source.name === "Logam Mulia" ? "logam-mulia" : source.name === "Raja Emas" ? "raja-emas" : "generic-table"),
+      source.name === "Logam Mulia"
+        ? "logam-mulia"
+        : source.name === "Raja Emas"
+          ? "raja-emas"
+          : source.name === "Laku Emas"
+            ? "laku-emas"
+            : "generic-table",
     titleSelector: source.titleSelector ?? "",
     dataSelector: source.dataSelector ?? "",
     rowSelector: source.rowSelector ?? "",
@@ -133,6 +139,8 @@ function sourceRecordFromRow(row: Record<string, unknown>): AdminSourceRecord {
         ? "logam-mulia"
         : selectorConfig.parserType === "raja-emas"
           ? "raja-emas"
+          : selectorConfig.parserType === "laku-emas"
+            ? "laku-emas"
           : "generic-table",
     titleSelector: selectorConfig.titleSelector ? String(selectorConfig.titleSelector) : undefined,
     dataSelector: selectorConfig.dataSelector ? String(selectorConfig.dataSelector) : undefined,
@@ -173,6 +181,27 @@ function sourceRecordFromRow(row: Record<string, unknown>): AdminSourceRecord {
       boundaryStopKeywords: record.boundaryStopKeywords?.length
         ? record.boundaryStopKeywords
         : ["Emas Batangan Gift Series", "Emas Batangan Selamat Idul Fitri", "Emas Batangan Imlek", "Emas Batangan Batik Seri III", "Perak Heritage"]
+    };
+  }
+
+  if (/^laku\s*emas$/i.test(record.name)) {
+    return {
+      ...record,
+      parserType: "laku-emas",
+      dataSelector: record.dataSelector || "#priceList table.table-bordered",
+      rowSelector: record.rowSelector || "table.table-bordered tbody tr",
+      fieldMapping: {
+        ...(record.fieldMapping ?? {}),
+        weightIndex: record.fieldMapping?.weightIndex ?? 0,
+        priceIndex: record.fieldMapping?.priceIndex ?? 1,
+        productTypeIndex: record.fieldMapping?.productTypeIndex ?? 0
+      },
+      elementKeywords: record.elementKeywords.length ? record.elementKeywords : ["showPrice('perhiasan')", "Kadar", "Harga Jual/ Gram"],
+      includeKeywords: record.includeKeywords?.length ? record.includeKeywords : ["K", "Rp"],
+      excludeKeywords:
+        record.excludeKeywords?.length
+          ? record.excludeKeywords
+          : ["ANTAM CERTIEYE", "ANTAM RETRO", "STAR GOLD", "LM OTHERS"]
     };
   }
 

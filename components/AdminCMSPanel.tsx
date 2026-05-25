@@ -69,6 +69,7 @@ type SourcePreviewResponse = {
       parser?: string;
       sectionsFound?: string[];
       ignoredSections?: string[];
+      ignoredCategories?: string[];
       validRows?: number;
       skippedRows?: number;
       skippedSamples?: Array<{ section: string | null; reason: string; sample: string }>;
@@ -76,6 +77,10 @@ type SourcePreviewResponse = {
       rawSelectorCount?: number;
       ignoredTextCount?: number;
       headerFound?: boolean;
+      activeTabDetected?: boolean;
+      parsedCategory?: string;
+      sourceSelectorUsed?: string;
+      endpointUrl?: string;
     };
     message: string;
   };
@@ -248,6 +253,7 @@ export function AdminCMSPanel() {
   const [sourceDocumentFile, setSourceDocumentFile] = useState<File | null>(null);
   const [sourceDocumentAudit, setSourceDocumentAudit] = useState<SourceDocumentValidationResponse | null>(null);
   const isRajaPreview = (sourceForm.parserType ?? "generic-table") === "raja-emas" || /raja\s*emas/i.test(sourceForm.name);
+  const isLakuPreview = (sourceForm.parserType ?? "generic-table") === "laku-emas" || /laku\s*emas/i.test(sourceForm.name);
 
   const mappings = useMemo(
     () =>
@@ -870,6 +876,7 @@ export function AdminCMSPanel() {
                 <option value="generic-table">generic-table</option>
                 <option value="logam-mulia">logam-mulia</option>
                 <option value="raja-emas">raja-emas</option>
+                <option value="laku-emas">laku-emas</option>
               </select>
               <input
                 value={sourceForm.selectorSummary}
@@ -1024,8 +1031,13 @@ export function AdminCMSPanel() {
                     <div className="mt-3 grid gap-2 rounded-lg border border-border bg-background p-3 text-xs text-textSecondary">
                       <p className="font-bold text-textPrimary">Debug Parser ({sourcePreview.debug.parser ?? "generic-table"})</p>
                       <p>Raw selector result: {sourcePreview.debug.rawSelectorCount ?? sourcePreview.rowsFound}</p>
+                      <p>Selector dipakai: {sourcePreview.debug.sourceSelectorUsed ?? sourcePreview.selector ?? "-"}</p>
+                      {sourcePreview.debug.endpointUrl && <p>Endpoint parser: {sourcePreview.debug.endpointUrl}</p>}
+                      {typeof sourcePreview.debug.activeTabDetected === "boolean" && <p>Tab PERHIASAN aktif: {sourcePreview.debug.activeTabDetected ? "Ya" : "Tidak"}</p>}
+                      {sourcePreview.debug.parsedCategory && <p>Kategori ter-parse: {sourcePreview.debug.parsedCategory}</p>}
                       <p>Section ditemukan: {sourcePreview.debug.sectionsFound?.join(", ") || "-"}</p>
                       <p>Section diabaikan: {sourcePreview.debug.ignoredSections?.join(", ") || "-"}</p>
+                      {sourcePreview.debug.ignoredCategories?.length ? <p>Kategori diabaikan: {sourcePreview.debug.ignoredCategories.join(", ")}</p> : null}
                       {typeof sourcePreview.debug.ignoredTextCount === "number" && <p>Ignored text count: {sourcePreview.debug.ignoredTextCount}</p>}
                       {typeof sourcePreview.debug.headerFound === "boolean" && <p>Header tabel ditemukan: {sourcePreview.debug.headerFound ? "Ya" : "Tidak"}</p>}
                       <p>Row valid: {sourcePreview.debug.validRows ?? sourcePreview.validRows} | Row di-skip: {sourcePreview.debug.skippedRows ?? 0}</p>
@@ -1048,6 +1060,11 @@ export function AdminCMSPanel() {
                               <th className="px-2 py-2">Kadar Karat</th>
                               <th className="px-2 py-2 text-right">Harga per Gram</th>
                             </>
+                          ) : isLakuPreview ? (
+                            <>
+                              <th className="px-2 py-2">Kadar</th>
+                              <th className="px-2 py-2 text-right">Harga Jual / Gram</th>
+                            </>
                           ) : (
                             <>
                               <th className="px-2 py-2">Kategori</th>
@@ -1066,6 +1083,11 @@ export function AdminCMSPanel() {
                                 <td className="px-2 py-2">{row.weight ?? row.berat}</td>
                                 <td className="px-2 py-2 text-right font-semibold">{row.harga ?? "-"}</td>
                               </>
+                            ) : isLakuPreview ? (
+                              <>
+                                <td className="px-2 py-2">{row.weight ?? row.berat}</td>
+                                <td className="px-2 py-2 text-right font-semibold">{row.harga ?? "-"}</td>
+                              </>
                             ) : (
                               <>
                                 <td className="px-2 py-2">{row.category ?? "-"}</td>
@@ -1078,7 +1100,7 @@ export function AdminCMSPanel() {
                         ))}
                         {!sourcePreview.rows.length && (
                           <tr>
-                            <td colSpan={isRajaPreview ? 2 : 4} className="px-2 py-5 text-center text-textSecondary">
+                            <td colSpan={isRajaPreview || isLakuPreview ? 2 : 4} className="px-2 py-5 text-center text-textSecondary">
                               Tidak ada row valid. Periksa row selector atau boundary keyword.
                             </td>
                           </tr>

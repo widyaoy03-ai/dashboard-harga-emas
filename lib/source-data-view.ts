@@ -16,6 +16,10 @@ function isRajaEmasSource(sourceName: string) {
   return /raja\s*emas/i.test(sourceName);
 }
 
+function isLakuEmasSource(sourceName: string) {
+  return /laku\s*emas/i.test(sourceName);
+}
+
 function isLogamMuliaSnapshot(snapshot: GoldPriceSnapshot) {
   return (
     /logam\s*mulia/i.test(snapshot.source_name) ||
@@ -89,6 +93,17 @@ function buildSourceSpecificRows(snapshot: GoldPriceSnapshot) {
       rows: rows.map((row) => ({
         kadar_karat: row.weight ?? row.berat,
         harga_per_gram: row.harga
+      }))
+    };
+  }
+
+  if (isLakuEmasSource(snapshot.source_name)) {
+    const columns = [textColumn("kadar", "Kadar"), priceColumn("harga_jual_per_gram", "Harga Jual / Gram")];
+    return {
+      columns,
+      rows: rows.map((row) => ({
+        kadar: row.weight ?? row.berat,
+        harga_jual_per_gram: row.harga
       }))
     };
   }

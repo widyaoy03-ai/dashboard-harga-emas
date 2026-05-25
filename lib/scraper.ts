@@ -521,6 +521,94 @@ function isRajaEmasParser(source: SourceConfig) {
   return source.parserType === "raja-emas" || source.name.toLowerCase().includes("raja emas");
 }
 
+type LakuEmasSkippedRow = {
+  reason: string;
+  sample: string;
+};
+
+type LakuEmasParseContext = {
+  activeTabDetected?: boolean;
+  parsedCategory?: string;
+  ignoredCategories?: string[];
+  endpointUrl?: string;
+  sourceSelectorUsed?: string;
+};
+
+function isLakuEmasParser(source: SourceConfig) {
+  return source.parserType === "laku-emas" || source.name.toLowerCase().includes("laku emas");
+}
+
+function isLakuKadarLabel(value: string) {
+  const compact = value.replace(/\s+/g, "").toUpperCase();
+  const withKPrefix = compact.match(/^K(\d{1,2})(?:\*|\(.+\))?$/);
+  const withKSuffix = compact.match(/^(\d{1,2})K(?:\(.+\))?$/);
+  const karat = Number(withKPrefix?.[1] ?? withKSuffix?.[1]);
+  return Number.isFinite(karat) && karat >= 5 && karat <= 24;
+}
+
+function parseLakuEmasRows(source: SourceConfig, html: string, text: string, context: LakuEmasParseContext = {}) {
+  const updateTime = findTimestamp(text) ?? nowIso();
+  const selector = configuredRowSelector(source) ?? "table.table-bordered tbody tr";
+  const rowSelections = tableRowSelectionsFromHtml(html, selector);
+  const skippedRows: LakuEmasSkippedRow[] = [];
+  const rows: GoldPriceRow[] = [];
+  let headerFound = /kadar/i.test(text) && /harga\s*jual\s*\/?\s*gram/i.test(text);
+
+  const trackSkip = (reason: string, sample: string) => {
+    if (skippedRows.length < 20) skippedRows.push({ reason, sample: sample.slice(0, 220) });
+  };
+
+  for (const rowSelection of rowSelections) {
+    const cells = rowSelection.cells.map((cell) => cell.replace(/\s+/g, " ").trim()).filter(Boolean);
+    if (!cells.length) continue;
+    const rowText = cells.join(" | ");
+
+    if (/kadar/i.test(rowText) && /harga\s*jual/i.test(rowText)) {
+      headerFound = true;
+      continue;
+    }
+    if (cells.length < 2) {
+      trackSkip("kolom kurang dari 2", rowText);
+      continue;
+    }
+
+    const kadar = cells[0];
+    const hargaJualPerGram = cleanPrice(cells[1], source.priceCurrency);
+    if (!isLakuKadarLabel(kadar)) {
+      trackSkip("row non-kadar/teks diabaikan", rowText);
+      continue;
+    }
+    if (!hargaJualPerGram || !/^Rp/i.test(hargaJualPerGram)) {
+      trackSkip("harga jual per gram tidak valid", rowText);
+      continue;
+    }
+
+    rows.push(
+      createPriceRow(source, "Emas perhiasan", kadar, hargaJualPerGram, null, updateTime, "PERHIASAN", {
+        product_type: "Kadar",
+        weight: kadar,
+        base_price: null,
+        price_pph_025: null,
+        source: source.name,
+        scraped_at: updateTime
+      })
+    );
+  }
+
+  return {
+    selectorUsed: context.sourceSelectorUsed ?? selector,
+    endpointUrl: context.endpointUrl ?? null,
+    parsedCategory: context.parsedCategory ?? "PERHIASAN",
+    activeTabDetected: context.activeTabDetected ?? headerFound,
+    ignoredCategories: context.ignoredCategories ?? [],
+    rowSelectionsCount: rowSelections.length,
+    rows: dedupeRows(rows).slice(0, 60),
+    validRows: rows.length,
+    headerFound,
+    skippedRows
+  };
+}
+
 function isRajaKaratLabel(value: string) {
   const compact = value.replace(/\s+/g, "").toUpperCase();
   const match = compact.match(/^K(\d{1,2})\*?$/);
@@ -640,6 +728,10 @@ function extractPriceRows(source: SourceConfig, jenisKonten: string, html: strin
     return parseRajaEmasRows(source, html, text).rows;
   }
 
+  if (isLakuEmasParser(source)) {
+    return parseLakuEmasRows(source, html, text).rows;
+  }
+
   if (source.priceCurrency === "USD") {
     const prices = priceCandidates(text, "USD");
     return prices.length ? [createPriceRow(source, jenisEmas, "1 ons troi", prices[0], null, updateTime)] : [];
@@ -721,7 +813,15 @@ async function fetchHtml(url: string, maxAttempts = 2) {
     } catch (error) {
       lastError = error;
       const errorName = error instanceof Error ? error.name : "UnknownError";
-      const errorMessage = error instanceof Error ? error.message : "Fetch source gagal.";
+      const cause = error && typeof error === "object" && "cause" in error ? (error as { cause?: unknown }).cause : null;
+      const causeMessage =
+        cause && typeof cause === "object"
+          ? [("code" in cause ? String((cause as { code?: unknown }).code ?? "") : "").trim(), ("message" in cause ? String((cause as { message?: unknown }).message ?? "") : "").trim()]
+              .filter(Boolean)
+              .join(" - ")
+          : "";
+      const baseErrorMessage = error instanceof Error ? error.message : "Fetch source gagal.";
+      const errorMessage = causeMessage ? `${baseErrorMessage} (${causeMessage})` : baseErrorMessage;
       lastDiagnostics = {
         ok: false,
         status: 0,
@@ -763,6 +863,58 @@ async function fetchHtml(url: string, maxAttempts = 2) {
         errorMessage: lastError instanceof Error ? lastError.message : "Fetch source gagal.",
         sampleHtml: ""
       }
+  };
+}
+
+type LakuEmasFetchContext = {
+  landing: Awaited<ReturnType<typeof fetchHtml>>;
+  fetched: Awaited<ReturnType<typeof fetchHtml>>;
+  html: string;
+  text: string;
+  endpointUrl: string;
+  parsedCategory: "PERHIASAN";
+  activeTabDetected: boolean;
+  categoriesDetected: string[];
+  ignoredCategories: string[];
+  sourceSelectorUsed: string;
+};
+
+function resolveLakuPerhiasanEndpoint(url: string) {
+  const origin = new URL(url).origin;
+  return `${origin}/harga-emas-fisik/brand/perhiasan`;
+}
+
+function lakuCategoriesFromLanding(html: string) {
+  const categories = [...html.matchAll(/showPrice\('([^']+)'\)/gi)].map((match) => match[1].trim().toLowerCase()).filter(Boolean);
+  return [...new Set(categories)];
+}
+
+async function fetchLakuEmasPerhiasanContext(source: SourceConfig, maxAttempts = 2): Promise<LakuEmasFetchContext> {
+  const sourceSelectorUsed = configuredRowSelector(source) ?? "table.table-bordered tbody tr";
+  const endpointUrl = resolveLakuPerhiasanEndpoint(source.url);
+  const landing = await fetchHtml(source.url, maxAttempts);
+  const categoriesDetected = landing.ok ? lakuCategoriesFromLanding(landing.html) : [];
+  const endpointFetched = await fetchHtml(endpointUrl, maxAttempts);
+  const activeTabDetected =
+    categoriesDetected.includes("perhiasan") || (landing.ok && /id=["']perhiasan["']|showPrice\('perhiasan'\)/i.test(landing.html));
+  const ignoredCategories = (categoriesDetected.length ? categoriesDetected : ["antam", "retro", "star_gold", "lm_other"]).filter(
+    (category) => category !== "perhiasan"
+  );
+  const activeCategoryResponse = endpointFetched.ok && /kadar/i.test(endpointFetched.html) && /harga\s*jual\s*\/?\s*gram/i.test(endpointFetched.html);
+  const fetched = endpointFetched.ok && endpointFetched.html.length >= 200 ? endpointFetched : landing;
+  const html = fetched.html;
+
+  return {
+    landing,
+    fetched,
+    html,
+    text: stripTags(html),
+    endpointUrl,
+    parsedCategory: "PERHIASAN",
+    activeTabDetected: activeTabDetected || activeCategoryResponse,
+    categoriesDetected,
+    ignoredCategories,
+    sourceSelectorUsed
   };
 }
 
@@ -915,7 +1067,8 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
   }
 
   try {
-    const fetched = await fetchHtml(source.url, 3);
+    const lakuContext = isLakuEmasParser(source) ? await fetchLakuEmasPerhiasanContext(source, 3) : null;
+    const fetched = lakuContext?.fetched ?? (await fetchHtml(source.url, 3));
     if (!fetched.ok || fetched.html.length < 200) {
       return {
         ...base,
@@ -925,8 +1078,9 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
       };
     }
 
-    const visibleText = stripTags(fetched.html);
-    const text = `${visibleText} ${fetched.html}`;
+    const htmlForParse = lakuContext?.html ?? fetched.html;
+    const visibleText = lakuContext?.text ?? stripTags(htmlForParse);
+    const text = `${visibleText} ${htmlForParse}`;
     const elementValid =
       source.elementKeywords.length === 0 || source.elementKeywords.some((keyword) => text.toLowerCase().includes(keyword.toLowerCase()));
     if (!elementValid) {
@@ -938,13 +1092,29 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
       };
     }
 
-    const rows = extractPriceRows(source, jenisKonten, fetched.html, visibleText);
+    const rows = extractPriceRows(source, jenisKonten, htmlForParse, visibleText);
     if (!rows.length) {
-      const rajaDebug = isRajaEmasParser(source) ? parseRajaEmasRows(source, fetched.html, visibleText) : null;
+      const rajaDebug = isRajaEmasParser(source) ? parseRajaEmasRows(source, htmlForParse, visibleText) : null;
       const logamDebug =
         source.parserType === "logam-mulia" || source.name === "Logam Mulia"
-          ? parseLogamMuliaSections(source, jenisKonten, fetched.html, visibleText)
+          ? parseLogamMuliaSections(source, jenisKonten, htmlForParse, visibleText)
           : null;
+      const lakuDebug =
+        isLakuEmasParser(source) && lakuContext
+          ? parseLakuEmasRows(source, htmlForParse, visibleText, {
+              activeTabDetected: lakuContext.activeTabDetected,
+              parsedCategory: lakuContext.parsedCategory,
+              ignoredCategories: lakuContext.ignoredCategories,
+              endpointUrl: lakuContext.endpointUrl,
+              sourceSelectorUsed: lakuContext.sourceSelectorUsed
+            })
+          : null;
+      const lakuLandingNote =
+        lakuContext && !lakuContext.landing.ok
+          ? `Halaman utama gagal diakses (HTTP ${lakuContext.landing.status}).`
+          : lakuContext && !lakuContext.categoriesDetected.includes("perhiasan")
+            ? "Tab PERHIASAN tidak terdeteksi pada HTML halaman utama."
+            : "";
       return {
         ...base,
         id: crypto.randomUUID(),
@@ -953,6 +1123,8 @@ async function runSingleSource(portal: Portal, jenisKonten: string, source: Sour
           ? `Data harga dari ${source.name} tidak dapat diparse. HTTP ${fetched.status}, HTML ${fetched.diagnostics.htmlSize} karakter, selector ${configuredRowSelector(source) ?? "-"}, section ditemukan: ${logamDebug.foundSections.join(", ") || "-"}, row valid: ${logamDebug.rows.length}, row di-skip: ${logamDebug.invalidRowsSkipped}.`
           : rajaDebug
             ? `Data harga dari ${source.name} tidak dapat diparse. HTTP ${fetched.status}, HTML ${fetched.diagnostics.htmlSize} karakter, selector ${rajaDebug.selectorUsed}, header tabel ditemukan: ${rajaDebug.headerFound ? "Ya" : "Tidak"}, row selector: ${rajaDebug.rowSelectionsCount}, row valid: ${rajaDebug.validRows}, text diabaikan: ${rajaDebug.ignoredTextCount}.`
+            : lakuDebug
+              ? `Data harga dari ${source.name} tidak dapat diparse. Endpoint ${lakuDebug.endpointUrl ?? "-"}, tab PERHIASAN: ${lakuDebug.activeTabDetected ? "aktif" : "tidak terdeteksi"}, kategori: ${lakuDebug.parsedCategory}, selector: ${lakuDebug.selectorUsed}, row selector: ${lakuDebug.rowSelectionsCount}, row valid: ${lakuDebug.validRows}, kategori diabaikan: ${lakuDebug.ignoredCategories.join(", ") || "-"}. ${lakuLandingNote}`.trim()
             : `Data harga dari ${source.name} tidak dapat diparse. HTTP ${fetched.status}, HTML ${fetched.diagnostics.htmlSize} karakter, selector ${configuredRowSelector(source) ?? "-"}.`
       };
     }
@@ -1007,7 +1179,8 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
   }
 
   try {
-    const fetched = await fetchHtml(source.url);
+    const lakuContext = isLakuEmasParser(source) ? await fetchLakuEmasPerhiasanContext(source) : null;
+    const fetched = lakuContext?.fetched ?? (await fetchHtml(source.url));
     if (!fetched.ok || fetched.html.length < 200) {
       return {
         ok: false,
@@ -1021,13 +1194,24 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
       };
     }
 
-    const visibleText = stripTags(fetched.html);
-    const candidateRows = selector ? tableRowsFromHtml(fetched.html, selector).length : tableRowsFromHtml(fetched.html).length;
-    const rows = extractPriceRows(source, jenisKonten, fetched.html, visibleText);
-    const rajaEmasDebug = isRajaEmasParser(source) ? parseRajaEmasRows(source, fetched.html, visibleText) : null;
+    const htmlForParse = lakuContext?.html ?? fetched.html;
+    const visibleText = lakuContext?.text ?? stripTags(htmlForParse);
+    const candidateRows = selector ? tableRowsFromHtml(htmlForParse, selector).length : tableRowsFromHtml(htmlForParse).length;
+    const rows = extractPriceRows(source, jenisKonten, htmlForParse, visibleText);
+    const rajaEmasDebug = isRajaEmasParser(source) ? parseRajaEmasRows(source, htmlForParse, visibleText) : null;
     const logamMuliaDebug =
       source.parserType === "logam-mulia" || source.name === "Logam Mulia"
-        ? parseLogamMuliaSections(source, jenisKonten, fetched.html, visibleText)
+        ? parseLogamMuliaSections(source, jenisKonten, htmlForParse, visibleText)
+        : null;
+    const lakuDebug =
+      isLakuEmasParser(source) && lakuContext
+        ? parseLakuEmasRows(source, htmlForParse, visibleText, {
+            activeTabDetected: lakuContext.activeTabDetected,
+            parsedCategory: lakuContext.parsedCategory,
+            ignoredCategories: lakuContext.ignoredCategories,
+            endpointUrl: lakuContext.endpointUrl,
+            sourceSelectorUsed: lakuContext.sourceSelectorUsed
+          })
         : null;
 
     return {
@@ -1063,6 +1247,24 @@ export async function previewSourceScrape(source: SourceConfig, jenisKonten = so
               ignoredTextCount: rajaEmasDebug.ignoredTextCount,
               headerFound: rajaEmasDebug.headerFound
             }
+          : lakuDebug
+            ? {
+                parser: "laku-emas-perhiasan",
+                validRows: lakuDebug.validRows,
+                skippedRows: lakuDebug.skippedRows.length,
+                skippedSamples: lakuDebug.skippedRows.map((item) => ({
+                  section: lakuDebug.parsedCategory,
+                  reason: item.reason,
+                  sample: item.sample
+                })),
+                rawSelectorCount: lakuDebug.rowSelectionsCount,
+                headerFound: lakuDebug.headerFound,
+                activeTabDetected: lakuDebug.activeTabDetected,
+                parsedCategory: lakuDebug.parsedCategory,
+                ignoredCategories: lakuDebug.ignoredCategories,
+                sourceSelectorUsed: lakuDebug.selectorUsed,
+                endpointUrl: lakuDebug.endpointUrl
+              }
           : undefined,
       message: rows.length
         ? `Preview menemukan ${rows.length} data valid dari ${candidateRows} row.`
@@ -1111,7 +1313,9 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
   let sampleParsedRow: GoldPriceRow | null = null;
   let logamMuliaDebug: ReturnType<typeof parseLogamMuliaSections> | null = null;
   let rajaEmasDebug: ReturnType<typeof parseRajaEmasRows> | null = null;
+  let lakuEmasDebug: ReturnType<typeof parseLakuEmasRows> | null = null;
   let fetchDiagnostics: FetchDiagnostics | null = null;
+  let lakuContext: LakuEmasFetchContext | null = null;
 
   const invalidResult = () => ({
     ok: false,
@@ -1137,6 +1341,11 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
       rawSelectorCount: rajaEmasDebug?.rowSelectionsCount ?? rowCount,
       ignoredTextCount: rajaEmasDebug?.ignoredTextCount ?? 0,
       headerFound: rajaEmasDebug?.headerFound ?? false,
+      activeTabDetected: lakuEmasDebug?.activeTabDetected ?? lakuContext?.activeTabDetected ?? false,
+      parsedCategory: lakuEmasDebug?.parsedCategory ?? lakuContext?.parsedCategory ?? null,
+      ignoredCategories: lakuEmasDebug?.ignoredCategories ?? lakuContext?.ignoredCategories ?? [],
+      sourceSelectorUsed: lakuEmasDebug?.selectorUsed ?? lakuContext?.sourceSelectorUsed ?? selector,
+      endpointUrl: lakuEmasDebug?.endpointUrl ?? lakuContext?.endpointUrl ?? null,
       checkedAt
     },
     rows: [] as GoldPriceRow[]
@@ -1149,19 +1358,29 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
   }
 
   try {
-    const fetched = await fetchHtml(source.url);
+    lakuContext = isLakuEmasParser(source) ? await fetchLakuEmasPerhiasanContext(source) : null;
+    const fetched = lakuContext?.fetched ?? (await fetchHtml(source.url));
+    const htmlForParse = lakuContext?.html ?? fetched.html;
+    const textForParse = lakuContext?.text ?? stripTags(htmlForParse);
     fetchDiagnostics = fetched.diagnostics;
-    checks.urlAccessible = fetched.ok && fetched.html.length >= 200;
+    checks.urlAccessible = lakuContext
+      ? (lakuContext.landing.ok && lakuContext.landing.html.length >= 200) || (fetched.ok && htmlForParse.length >= 200)
+      : fetched.ok && htmlForParse.length >= 200;
 
     if (!checks.urlAccessible) {
-      reasons.push(fetchFailureMessage(source.name, fetched));
+      reasons.push(fetchFailureMessage(source.name, lakuContext?.landing ?? fetched));
       recommendations.push("Periksa URL source, akses publik halaman, atau proteksi anti-bot dari website tujuan.");
       return invalidResult();
     }
 
+    if (lakuContext && !lakuContext.activeTabDetected) {
+      reasons.push("Tab PERHIASAN tidak terdeteksi pada halaman utama Laku Emas.");
+      recommendations.push("Pastikan elemen tombol tab PERHIASAN masih memiliki id='perhiasan' dan onclick showPrice('perhiasan').");
+    }
+
     let matchedElements: ReturnType<typeof queryHtmlSelections> = [];
     try {
-      matchedElements = selector ? queryHtmlSelections(fetched.html, selector) : queryHtmlSelections(fetched.html, "tr");
+      matchedElements = selector ? queryHtmlSelections(htmlForParse, selector) : queryHtmlSelections(htmlForParse, "tr");
     } catch (error) {
       reasons.push(`Selector tidak valid: ${error instanceof Error ? error.message : "format selector tidak dapat dibaca"}.`);
       recommendations.push("Gunakan CSS selector row yang langsung mengarah ke baris tabel, misalnya table.table-bordered tr.");
@@ -1173,7 +1392,7 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
     sampleHtml = matchedElements[0]?.html?.slice(0, 1200) ?? "";
 
     try {
-      rowCount = selector ? tableRowsFromHtml(fetched.html, selector).length : tableRowsFromHtml(fetched.html).length;
+      rowCount = selector ? tableRowsFromHtml(htmlForParse, selector).length : tableRowsFromHtml(htmlForParse).length;
     } catch (error) {
       reasons.push(`Row tidak bisa dibaca dari selector: ${error instanceof Error ? error.message : "selector tidak dapat diproses"}.`);
       recommendations.push("Pastikan selector mengarah ke row tabel, bukan container besar atau elemen non-table.");
@@ -1182,23 +1401,41 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
 
     checks.rowFound = rowCount > 0;
 
-    const visibleText = stripTags(fetched.html);
-    rajaEmasDebug = isRajaEmasParser(source) ? parseRajaEmasRows(source, fetched.html, visibleText) : null;
+    const visibleText = textForParse;
+    rajaEmasDebug = isRajaEmasParser(source) ? parseRajaEmasRows(source, htmlForParse, visibleText) : null;
     logamMuliaDebug =
       source.parserType === "logam-mulia" || source.name === "Logam Mulia"
-        ? parseLogamMuliaSections(source, jenisKonten, fetched.html, visibleText)
+        ? parseLogamMuliaSections(source, jenisKonten, htmlForParse, visibleText)
         : null;
-    const rows = logamMuliaDebug ? logamMuliaDebug.rows : rajaEmasDebug ? rajaEmasDebug.rows : extractPriceRows(source, jenisKonten, fetched.html, visibleText);
+    lakuEmasDebug =
+      isLakuEmasParser(source) && lakuContext
+        ? parseLakuEmasRows(source, htmlForParse, visibleText, {
+            activeTabDetected: lakuContext.activeTabDetected,
+            parsedCategory: lakuContext.parsedCategory,
+            ignoredCategories: lakuContext.ignoredCategories,
+            endpointUrl: lakuContext.endpointUrl,
+            sourceSelectorUsed: lakuContext.sourceSelectorUsed
+          })
+        : null;
+    const rows = logamMuliaDebug
+      ? logamMuliaDebug.rows
+      : rajaEmasDebug
+        ? rajaEmasDebug.rows
+        : lakuEmasDebug
+          ? lakuEmasDebug.rows
+          : extractPriceRows(source, jenisKonten, htmlForParse, visibleText);
     validDataCount = rows.length;
     checks.dataParsed = validDataCount > 0;
     sampleParsedRow = rows[0] ?? null;
     checks.fieldMappingValid = isRajaEmasParser(source)
       ? Boolean(sampleParsedRow?.weight && sampleParsedRow?.harga && isRajaKaratLabel(sampleParsedRow.weight ?? sampleParsedRow.berat))
-      : Boolean(
-          sampleParsedRow?.weight &&
-            typeof sampleParsedRow.base_price === "number" &&
-            typeof sampleParsedRow.price_pph_025 === "number"
-        );
+      : isLakuEmasParser(source)
+        ? Boolean(sampleParsedRow?.weight && sampleParsedRow?.harga && isLakuKadarLabel(sampleParsedRow.weight ?? sampleParsedRow.berat))
+        : Boolean(
+            sampleParsedRow?.weight &&
+              typeof sampleParsedRow.base_price === "number" &&
+              typeof sampleParsedRow.price_pph_025 === "number"
+          );
 
     if (!checks.selectorFound) {
       reasons.push("Selector tidak menemukan element apa pun di halaman source.");
@@ -1212,11 +1449,15 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
       reasons.push(
         isRajaEmasParser(source)
           ? "Field mapping Raja Emas belum sesuai. Dibutuhkan td[0] kadar_karat dan td[1] harga_per_gram."
+          : isLakuEmasParser(source)
+            ? "Field mapping Laku Emas belum sesuai. Dibutuhkan td[0] kadar dan td[1] harga_jual_per_gram dari tab PERHIASAN."
           : "Field mapping belum sesuai. Untuk Logam Mulia dibutuhkan td[0] berat, td[1] harga dasar, td[2] harga + Pajak PPh 0.25%."
       );
       recommendations.push(
         isRajaEmasParser(source)
           ? "Periksa mapping kolom Raja Emas: weightIndex=0, priceIndex=1, parserType=raja-emas."
+          : isLakuEmasParser(source)
+            ? "Periksa parserType=laku-emas, endpoint /harga-emas-fisik/brand/perhiasan, dan mapping kolom weightIndex=0, priceIndex=1."
           : "Periksa mapping kolom: weightIndex=0, basePriceIndex=1, pricePph025Index=2."
       );
     }
@@ -1224,11 +1465,15 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
       reasons.push(
         isRajaEmasParser(source)
           ? "Data Raja Emas belum berhasil diparse dari tabel Kadar Karat."
+          : isLakuEmasParser(source)
+            ? "Data Laku Emas belum berhasil diparse dari tabel PERHIASAN."
           : "Data harga belum berhasil diparse dari row yang ditemukan."
       );
       recommendations.push(
         isRajaEmasParser(source)
           ? "Gunakan row selector yang mengarah ke tabel di bawah judul 'Harga Beli Emas Hari Ini di Raja Emas Indonesia'."
+          : isLakuEmasParser(source)
+            ? "Pastikan parser membaca endpoint brand/perhiasan dan row selector mengarah ke table.table-bordered tbody tr."
           : "Pastikan row berada di section yang benar: Emas Batangan atau Perak Murni."
       );
     }
@@ -1258,15 +1503,26 @@ export async function validateSourceScrape(source: SourceConfig, jenisKonten = s
         sampleParsedRow,
         sectionsFound: logamMuliaDebug?.foundSections ?? [],
         ignoredSections: logamMuliaDebug?.ignoredSections ?? [],
-        skippedRows: logamMuliaDebug?.invalidRowsSkipped ?? rajaEmasDebug?.skippedRows.length ?? 0,
+        skippedRows: logamMuliaDebug?.invalidRowsSkipped ?? rajaEmasDebug?.skippedRows.length ?? lakuEmasDebug?.skippedRows.length ?? 0,
         skippedSamples:
           logamMuliaDebug?.skippedRows ??
           rajaEmasDebug?.skippedRows.map((item) => ({ section: "Harga Emas Perhiasan", reason: item.reason, sample: item.sample })) ??
+          (lakuEmasDebug
+            ? (() => {
+                const parsedCategory = lakuEmasDebug.parsedCategory;
+                return lakuEmasDebug.skippedRows.map((item) => ({ section: parsedCategory, reason: item.reason, sample: item.sample }));
+              })()
+            : undefined) ??
           [],
         stoppedAtSection: logamMuliaDebug?.stoppedAtSection ?? null,
-        rawSelectorCount: rajaEmasDebug?.rowSelectionsCount ?? rowCount,
+        rawSelectorCount: rajaEmasDebug?.rowSelectionsCount ?? lakuEmasDebug?.rowSelectionsCount ?? rowCount,
         ignoredTextCount: rajaEmasDebug?.ignoredTextCount ?? 0,
-        headerFound: rajaEmasDebug?.headerFound ?? false,
+        headerFound: rajaEmasDebug?.headerFound ?? lakuEmasDebug?.headerFound ?? false,
+        activeTabDetected: lakuEmasDebug?.activeTabDetected ?? lakuContext?.activeTabDetected ?? false,
+        parsedCategory: lakuEmasDebug?.parsedCategory ?? lakuContext?.parsedCategory ?? null,
+        ignoredCategories: lakuEmasDebug?.ignoredCategories ?? lakuContext?.ignoredCategories ?? [],
+        sourceSelectorUsed: lakuEmasDebug?.selectorUsed ?? lakuContext?.sourceSelectorUsed ?? selector,
+        endpointUrl: lakuEmasDebug?.endpointUrl ?? lakuContext?.endpointUrl ?? null,
         checkedAt
       },
       rows: rows.slice(0, 40)
